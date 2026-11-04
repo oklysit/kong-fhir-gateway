@@ -24,8 +24,14 @@ const PATIENTS = {
 // Send a body as JSON with the given status and content type.
 // extraHeaders is optional; it adds headers such as allow on a 405.
 function send(res, status, contentType, body, extraHeaders = {}) {
-  res.writeHead(status, { "content-type": contentType, ...extraHeaders });
-  res.end(JSON.stringify(body));
+  // A fixed length avoids chunked encoding, so clients and raw-socket tests can read the body as plain JSON.
+  const text = JSON.stringify(body);
+  res.writeHead(status, {
+    "content-type": contentType,
+    "content-length": Buffer.byteLength(text),
+    ...extraHeaders,
+  });
+  res.end(text);
 }
 
 // Send a FHIR OperationOutcome error. Every error in this server uses this shape.
@@ -60,12 +66,12 @@ function handle(req, res) {
   }
 
   // Take only the path, so a query string like ?foo=1 does not break routing.
-  // A malformed request line makes URL throw. Answer 404 instead of crashing.
+  // A malformed request line is a client error, so 400.
   let path;
   try {
     path = new URL(req.url, "http://localhost").pathname;
   } catch {
-    return sendError(res, 404, "not-found", "Invalid request path");
+    return sendError(res, 400, "invalid", "Invalid request path");
   }
 
   if (path === "/.well-known/smart-configuration") {
