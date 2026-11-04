@@ -1,6 +1,7 @@
 // Tests for the mock FHIR server. Uses only node:test, node:assert/strict and global fetch.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { connect } from "node:net";
 import { createServer } from "./server.js";
 
 // Start a server on a random free port. Returns the server and its base URL.
@@ -121,10 +122,21 @@ test("GET /.well-known/smart-configuration uses the default ISSUER", async () =>
 
 test("GET /.well-known/smart-configuration honours a changed ISSUER env var", async () => {
   const saved = process.env.ISSUER;
-  const issuer = "https://auth.example.test/realms/other";
-  process.env.ISSUER = issuer;
+  delete process.env.ISSUER;
   const { server, base } = await start();
   try {
+    // One server for both requests: the first uses the default ISSUER.
+    const before = await fetch(`${base}/.well-known/smart-configuration`);
+    assert.equal(before.status, 200);
+    const defaultBody = await before.json();
+    assert.equal(
+      defaultBody.authorization_endpoint,
+      "http://localhost:8081/realms/fhir/protocol/openid-connect/auth",
+    );
+
+    // Change ISSUER without restarting the server. The next request must see it.
+    const issuer = "https://auth.example.test/realms/other";
+    process.env.ISSUER = issuer;
     const res = await fetch(`${base}/.well-known/smart-configuration`);
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -162,6 +174,7 @@ test("POST /fhir/Patient returns 405 OperationOutcome with not-supported", async
       body: JSON.stringify(PATIENT_1),
     });
     assert.equal(res.status, 405);
+    assert.equal(res.headers.get("allow"), "GET");
     assert.equal(res.headers.get("content-type"), "application/fhir+json");
     const body = await res.json();
     assert.equal(body.resourceType, "OperationOutcome");
@@ -179,10 +192,44 @@ test("DELETE on a Patient id returns 405 OperationOutcome with not-supported", a
   try {
     const res = await fetch(`${base}/fhir/Patient/patient-1`, { method: "DELETE" });
     assert.equal(res.status, 405);
+    assert.equal(res.headers.get("allow"), "GET");
     assert.equal(res.headers.get("content-type"), "application/fhir+json");
     const body = await res.json();
     assert.equal(body.resourceType, "OperationOutcome");
     assert.equal(body.issue[0].code, "not-supported");
+  } finally {
+    await stop(server);
+  }
+});
+
+// Send raw bytes over TCP and resolve with everything the server sends back
+// before it closes the connection. Used for requests that fetch cannot send.
+function rawRequest(port, text) {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1", () => socket.write(text));
+    let data = "";
+    socket.setEncoding("utf8");
+    socket.setTimeout(5000, () => socket.destroy(new Error("raw request timed out")));
+    socket.on("data", (chunk) => (data += chunk));
+    socket.on("end", () => resolve(data));
+    socket.on("error", reject);
+  });
+}
+
+test("a malformed request line does not crash the server", async () => {
+  const { server, base } = await start();
+  try {
+    const port = server.address().port;
+    const raw = await rawRequest(
+      port,
+      "GET http://[bad HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert.equal(raw.split("\r\n")[0].startsWith("HTTP/1.1 404"), true, `raw reply was: ${raw}`);
+
+    // The server must still answer a normal request after the bad one.
+    const res = await fetch(`${base}/fhir/Patient/patient-1`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), PATIENT_1);
   } finally {
     await stop(server);
   }
