@@ -224,7 +224,14 @@ test("a malformed request line does not crash the server", async () => {
       port,
       "GET http://[bad HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     );
-    assert.equal(raw.split("\r\n")[0].startsWith("HTTP/1.1 404"), true, `raw reply was: ${raw}`);
+    assert.equal(raw.split("\r\n")[0].startsWith("HTTP/1.1 400"), true, `raw reply was: ${raw}`);
+
+    // The raw reply body (text after the blank line) must be an OperationOutcome.
+    const rawBody = raw.slice(raw.indexOf("\r\n\r\n") + 4);
+    const outcome = JSON.parse(rawBody);
+    assert.equal(outcome.resourceType, "OperationOutcome");
+    assert.equal(outcome.issue[0].code, "invalid");
+    assert.equal(outcome.issue[0].severity, "error");
 
     // The server must still answer a normal request after the bad one.
     const res = await fetch(`${base}/fhir/Patient/patient-1`);
