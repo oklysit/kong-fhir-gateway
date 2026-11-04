@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: 22
 
-      # Runs `node --test`: the 10 mock-fhir tests and the infra checks.
+      # Runs `node --test`: the mock-fhir tests, the infra checks and the Keycloak checks.
       - run: npm test
 
   # Container proof: build the image, start it, and call it over HTTP.
@@ -34,18 +34,67 @@ jobs:
   compose:
     runs-on: ubuntu-latest
     steps:
-      # Download the repository, which holds docker-compose.yml and mock-fhir/.
+      # Download the repository, which holds docker-compose.yml, mock-fhir/ and keycloak/.
       - uses: actions/checkout@v4
 
-      # Build the image and start the container. --wait blocks until the healthcheck
-      # passes, and the step fails if the container never becomes healthy.
-      - name: Start mock FHIR stack
+      # Build the image and start the containers. --wait blocks until every healthcheck
+      # passes (mock-fhir and keycloak), and the step fails if a container never becomes healthy.
+      - name: Start mock FHIR and Keycloak stack
         run: docker compose up -d --build --wait
 
       # Request one Patient through the published port. -f makes curl exit non-zero on
       # an HTTP error (status 400 or higher). -s hides the progress meter, -S keeps errors visible.
       - name: Check Patient resource
         run: curl -fsS localhost:8080/fhir/Patient/patient-1
+
+      # Ask Keycloak for an access token for ada, using the password grant. The grant needs no
+      # browser, and it is for demo and CI only. The user, client and password are all synthetic.
+      # -f fails the step on an HTTP error. -s hides the progress meter, -S keeps errors visible.
+      # Bash runs with -e here, so a failed curl stops the step before any jq runs on bad data.
+      - name: Request token for ada
+        run: |
+          RESPONSE=$(curl -fsS -X POST http://localhost:8081/realms/fhir/protocol/openid-connect/token \
+            -d grant_type=password \
+            -d client_id=fhir-demo \
+            -d username=ada \
+            -d password=ada \
+            -d 'scope=openid launch/patient patient/Patient.read')
+          # Pull the access_token string out of the JSON response. -r prints it without quotes.
+          TOKEN=$(echo "$RESPONSE" | jq -r .access_token)
+
+          # A JWT has three base64url parts split by dots. The middle part is the payload.
+          # base64url uses - and _ where base64 uses + and /, so swap them back first.
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          # base64 -d needs the length to be a multiple of 4, so add "=" padding.
+          while [ $(( ${#PAYLOAD} % 4 )) -ne 0 ]; do PAYLOAD="$PAYLOAD="; done
+
+          # Decode the payload. jq -e exits non-zero when the expression is false, which fails the step.
+          # Check the issuer (must match the URL the stack was started with) and the patient claim.
+          echo "$PAYLOAD" | base64 -d | jq -e --arg iss "http://localhost:8081/realms/fhir" \
+            '.iss == $iss and .patient == "patient-1"'
+
+      # Same check for ben, who is linked to patient-2.
+      - name: Request token for ben
+        run: |
+          RESPONSE=$(curl -fsS -X POST http://localhost:8081/realms/fhir/protocol/openid-connect/token \
+            -d grant_type=password \
+            -d client_id=fhir-demo \
+            -d username=ben \
+            -d password=ben \
+            -d 'scope=openid launch/patient patient/Patient.read')
+          TOKEN=$(echo "$RESPONSE" | jq -r .access_token)
+
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          while [ $(( ${#PAYLOAD} % 4 )) -ne 0 ]; do PAYLOAD="$PAYLOAD="; done
+
+          echo "$PAYLOAD" | base64 -d | jq -e --arg iss "http://localhost:8081/realms/fhir" \
+            '.iss == $iss and .patient == "patient-2"'
+
+      # Print the Keycloak container log only when an earlier step failed. This shows why the
+      # import, the healthcheck or the token request went wrong. The log is not printed on success.
+      - name: Print Keycloak logs on failure
+        if: failure()
+        run: docker compose logs keycloak
 
       # Stop and remove the containers. always() runs this step even when an earlier
       # step failed, so no stack is left running on the runner.

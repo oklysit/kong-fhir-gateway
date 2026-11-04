@@ -1,0 +1,121 @@
+{
+  "realm": "fhir",
+  "displayName": "FHIR demo (synthetic data, dev only)",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "id": "fhir-demo-user-profile",
+        "name": "declarative user profile provider",
+        "providerId": "declarative-user-profile",
+        "config": {
+          "kc.user.profile.config": [
+            "{\"unmanagedAttributePolicy\":\"ENABLED\"}"
+          ]
+        }
+      }
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "launch/patient",
+      "description": "SMART launch context: the patient the user is linked to",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "patient/Patient.read",
+      "description": "Read the linked Patient resource",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "fhir-demo",
+      "name": "FHIR demo client",
+      "description": "Demo and CI only. The password grant (directAccessGrantsEnabled) lets CI and demo.sh get a token without a browser. A real SMART app uses the auth code + PKCE flow.",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:*"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "optionalClientScopes": [
+        "launch/patient",
+        "patient/Patient.read"
+      ],
+      "protocolMappers": [
+        {
+          "name": "patient",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "patient",
+            "claim.name": "patient",
+            "jsonType.label": "String",
+            "multivalued": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "ada",
+      "email": "ada@example.test",
+      "emailVerified": true,
+      "enabled": true,
+      "requiredActions": [],
+      "attributes": {
+        "patient": [
+          "patient-1"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "ada",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "ben",
+      "email": "ben@example.test",
+      "emailVerified": true,
+      "enabled": true,
+      "requiredActions": [],
+      "attributes": {
+        "patient": [
+          "patient-2"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "ben",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}
