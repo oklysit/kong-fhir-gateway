@@ -107,6 +107,18 @@ test("launch/patient and patient/Patient.read exist and are optional scopes of f
   }
 });
 
+// The AI scope (PR 7): ai/chat exists as a client scope and is an optional scope of fhir-demo.
+test("ai/chat exists and is an optional scope of fhir-demo", () => {
+  const realm = loadRealm();
+  const client = realm.clients?.find((c) => c.clientId === "fhir-demo");
+  assert.ok(client, "client fhir-demo is missing");
+  assert.ok(
+    realm.clientScopes?.some((scope) => scope.name === "ai/chat"),
+    "client scope ai/chat does not exist",
+  );
+  assert.ok(client.optionalClientScopes?.includes("ai/chat"), "ai/chat is not an optional scope of fhir-demo");
+});
+
 // Users: ada is patient-1 and ben is patient-2. Each user is enabled, has a verified
 // email, and has a non-temporary password that equals the username (synthetic).
 test("users ada and ben exist, are enabled, and email-verified", () => {
