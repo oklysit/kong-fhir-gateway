@@ -1,1 +1,12 @@
-{"name":"kong-fhir-gateway","private":true,"type":"module","scripts":{"test":"node --test"}}
+{
+  "name": "kong-fhir-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "up": "docker compose up -d --build --wait",
+    "down": "docker compose down",
+    "e2e": "bash scripts/e2e.sh",
+    "e2e:ai": "bash scripts/e2e-ai.sh"
+  }
+}
