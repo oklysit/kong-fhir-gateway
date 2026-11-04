@@ -22,18 +22,19 @@ const PATIENTS = {
 };
 
 // Send a body as JSON with the given status and content type.
-function send(res, status, contentType, body) {
-  res.writeHead(status, { "content-type": contentType });
+// extraHeaders is optional; it adds headers such as allow on a 405.
+function send(res, status, contentType, body, extraHeaders = {}) {
+  res.writeHead(status, { "content-type": contentType, ...extraHeaders });
   res.end(JSON.stringify(body));
 }
 
 // Send a FHIR OperationOutcome error. Every error in this server uses this shape.
-function sendError(res, status, code, diagnostics) {
+function sendError(res, status, code, diagnostics, extraHeaders = {}) {
   const outcome = {
     resourceType: "OperationOutcome",
     issue: [{ severity: "error", code, diagnostics }],
   };
-  send(res, status, "application/fhir+json", outcome);
+  send(res, status, "application/fhir+json", outcome, extraHeaders);
 }
 
 // Build the SMART discovery document. ISSUER is read on each request,
@@ -51,12 +52,21 @@ function smartConfiguration() {
 
 // Handle one request. This mock is read-only, so any non-GET method gets 405.
 function handle(req, res) {
+  // A 405 must say which method is allowed, so it carries an allow header.
   if (req.method !== "GET") {
-    return sendError(res, 405, "not-supported", `Method ${req.method} is not supported`);
+    return sendError(res, 405, "not-supported", `Method ${req.method} is not supported`, {
+      allow: "GET",
+    });
   }
 
   // Take only the path, so a query string like ?foo=1 does not break routing.
-  const path = new URL(req.url, "http://localhost").pathname;
+  // A malformed request line makes URL throw. Answer 404 instead of crashing.
+  let path;
+  try {
+    path = new URL(req.url, "http://localhost").pathname;
+  } catch {
+    return sendError(res, 404, "not-found", "Invalid request path");
+  }
 
   if (path === "/.well-known/smart-configuration") {
     return send(res, 200, "application/json", smartConfiguration());
