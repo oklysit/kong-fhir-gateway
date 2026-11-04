@@ -1,7 +1,7 @@
-# Compose file: runs the mock FHIR server as one container.
+# Compose file: runs the mock FHIR server and the Keycloak login server.
 # No top-level "version:" key. Compose v2 ignores it and warns when it is present.
 
-# All containers in this file. Only one service today.
+# All containers in this file.
 services:
   # The service name. Other containers on the same network would reach it by this name.
   mock-fhir:
@@ -33,3 +33,58 @@ services:
 
       # Seconds after start during which failures are ignored, so slow boots are not penalised.
       start_period: 5s
+
+  # Keycloak: the login server. It issues the JWTs that mock-fhir's ISSUER points at.
+  # Demo only: synthetic users, plain-text dev admin, no TLS.
+  keycloak:
+    # Exact pinned tag. "26.8.1" exists on quay.io (checked against the quay.io tag API).
+    # Never use "latest": a new image would change login behaviour without a commit.
+    image: quay.io/keycloak/keycloak:26.8.1
+
+    # "start-dev" runs Keycloak in development mode (plain HTTP, no TLS setup).
+    # "--import-realm" loads every realm file found in /opt/keycloak/data/import at startup.
+    command: start-dev --import-realm
+
+    # Publish host port 8081 to container port 8080. Port 8080 is taken by mock-fhir on the host.
+    ports:
+      - "8081:8080"
+
+    # The realm file is the only input. Read-only, so the container cannot edit it.
+    # The realm file explains the clients and users. JSON cannot hold comments, so the
+    # comments for it live here and in the file's displayName and client description.
+    volumes:
+      - ./keycloak/realm-fhir.json:/opt/keycloak/data/import/realm-fhir.json:ro
+
+    environment:
+      # Dev-only admin login for the Keycloak admin console. Synthetic, not a secret.
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+
+      # Public URL that Keycloak puts in the token "iss" claim.
+      # It must equal the ISSUER that mock-fhir advertises: http://localhost:8081/realms/fhir.
+      KC_HOSTNAME: http://localhost:8081
+
+      # Turns on the health endpoints. They are served on the management port 9000.
+      KC_HEALTH_ENABLED: "true"
+
+    healthcheck:
+      # Keycloak's image has no curl. This probe uses bash's /dev/tcp to open a raw TCP
+      # socket to the management port 9000 and send one HTTP GET to /health/ready.
+      # Chosen over a plain port check because a bound port does not mean Keycloak is ready.
+      # The probe exits 0 only when the status line contains " 200 ".
+      # bash is required: /dev/tcp is a bash feature that sh (dash) does not have.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+
+      # Seconds between probes.
+      interval: 10s
+
+      # Seconds one probe may run before it counts as a failure.
+      timeout: 5s
+
+      # Consecutive failures allowed before the container is marked unhealthy.
+      # 30 retries at 10s covers slow CI runners after the start period.
+      retries: 30
+
+      # Seconds after start during which failures are ignored. Keycloak takes a while to boot
+      # and import the realm, so the first minute does not count against it.
+      start_period: 60s
