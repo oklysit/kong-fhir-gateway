@@ -29,23 +29,19 @@ jobs:
       # Runs `node --test`: the mock-fhir tests, the infra checks and the Keycloak checks.
       - run: npm test
 
-  # Container proof: build the image, start it, and call it over HTTP.
+  # Container proof: build the image, start the stack, and check it end to end through Kong.
   # No `needs:` key, so this job runs in parallel with `test`.
   compose:
     runs-on: ubuntu-latest
     steps:
-      # Download the repository, which holds docker-compose.yml, mock-fhir/ and keycloak/.
+      # Download the repository, which holds docker-compose.yml, mock-fhir/, keycloak/ and kong/.
       - uses: actions/checkout@v4
 
       # Build the image and start the containers. --wait blocks until every healthcheck
-      # passes (mock-fhir and keycloak), and the step fails if a container never becomes healthy.
-      - name: Start mock FHIR and Keycloak stack
+      # passes (mock-fhir, keycloak, kong), and the step fails if a container never becomes healthy.
+      # The kong-config one-shot job must also finish with exit code 0 before Kong starts.
+      - name: Start Kong, mock FHIR and Keycloak stack
         run: docker compose up -d --build --wait
-
-      # Request one Patient through the published port. -f makes curl exit non-zero on
-      # an HTTP error (status 400 or higher). -s hides the progress meter, -S keeps errors visible.
-      - name: Check Patient resource
-        run: curl -fsS localhost:8080/fhir/Patient/patient-1
 
       # Ask Keycloak for an access token for ada, using the password grant. The grant needs no
       # browser, and it is for demo and CI only. The user, client and password are all synthetic.
@@ -90,11 +86,20 @@ jobs:
           echo "$PAYLOAD" | base64 -d | jq -e --arg iss "http://localhost:8081/realms/fhir" \
             '.iss == $iss and .patient == "patient-2"'
 
-      # Print the Keycloak container log only when an earlier step failed. This shows why the
-      # import, the healthcheck or the token request went wrong. The log is not printed on success.
-      - name: Print Keycloak logs on failure
+      # Run the end-to-end checks through Kong on port 8000. The script covers the 401 and 403
+      # answers, the scope and patient rules, the discovery route, and the closed ports 8080 and 8001.
+      # It exits non-zero on the first failed check, which fails this step.
+      - name: Run end-to-end checks through Kong
+        run: bash scripts/e2e.sh
+
+      # Print the container logs only when an earlier step failed. This shows why the import,
+      # the healthcheck, the config render or the gateway check went wrong. Nothing is printed on success.
+      - name: Print service logs on failure
         if: failure()
-        run: docker compose logs keycloak
+        run: |
+          docker compose logs keycloak
+          docker compose logs kong-config
+          docker compose logs kong
 
       # Stop and remove the containers. always() runs this step even when an earlier
       # step failed, so no stack is left running on the runner.
