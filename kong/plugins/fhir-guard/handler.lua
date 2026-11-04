@@ -1,10 +1,15 @@
 -- fhir-guard: the Kong plugin that enforces what a verified token may do.
 -- It runs only after the jwt plugin has accepted the token (see PRIORITY below).
--- Rules, deny by default:
---   1. Only GET on exactly /fhir/Patient/<id>.
---   2. The token's "scope" claim must contain "patient/Patient.read" as a whole word.
---   3. The token's "patient" claim must equal <id>.
--- It also rewrites Kong's own 401 and 429 bodies into FHIR OperationOutcome.
+-- Rules, deny by default. This plugin runs on two routes; the path decides which rules apply:
+--   /fhir routes:
+--     1. Only GET on exactly /fhir/Patient/<id>.
+--     2. The token's "scope" claim must contain "patient/Patient.read" as a whole word.
+--     3. The token's "patient" claim must equal <id>.
+--   /ai routes (any path that starts with /ai):
+--     A. Only POST on exactly /ai/chat.
+--     B. The token's "scope" claim must contain "ai/chat" as a whole word.
+--     Any other /ai path is denied, so a new AI path needs a new rule here first.
+-- It also rewrites Kong's own 400, 401 and 429 bodies into FHIR OperationOutcome.
 
 -- The jwt parser that ships inside Kong. Used to read the claims of the already-verified token.
 local jwt_parser = require "kong.plugins.jwt.jwt_parser"
@@ -52,7 +57,27 @@ local function has_scope(scope_string, wanted)
   return false
 end
 
--- Access phase: runs for every request that reaches the fhir route, after jwt has accepted the token.
+-- Rules for the AI route. Deny by default: only POST on exactly /ai/chat, with the ai/chat scope.
+-- Returns nothing when every rule passes, so the request goes on to ai-prompt-guard and ai-proxy.
+local function check_ai(claims, path)
+  -- Rule A1: only POST. Kong's route also matches GET, and GET is not offered for chat.
+  if kong.request.get_method() ~= "POST" then
+    return deny(403, "forbidden", "This method is not allowed.")
+  end
+
+  -- Rule A2: the path must be exactly /ai/chat. Kong matches routes by prefix, so /ai/chat/extra
+  -- reaches this plugin. The exact comparison refuses it.
+  if path ~= "/ai/chat" then
+    return deny(403, "forbidden", "Only /ai/chat is allowed.")
+  end
+
+  -- Rule B: the token must carry the ai/chat scope as a whole word.
+  if not has_scope(claims.scope, "ai/chat") then
+    return deny(403, "forbidden", "The token does not allow AI operations.")
+  end
+end
+
+-- Access phase: runs for every request that reaches the fhir or ai route, after jwt has accepted the token.
 function FhirGuard:access(conf)
   -- The raw token string. jwt stores it here after it verified the signature and expiry.
   local token = kong.ctx.shared.authenticated_jwt_token
@@ -71,13 +96,24 @@ function FhirGuard:access(conf)
   -- The decoded payload: the claims table, with fields such as scope, patient and iss.
   local claims = parsed.claims or {}
 
+  -- The request path, without the query string. The branches below both read it.
+  local path = kong.request.get_path()
+
+  -- AI branch: every path that starts with /ai. string.sub compares plain text, so no escaping is needed.
+  -- Anything under /ai that is not exactly /ai/chat is denied inside check_ai.
+  if string.sub(path, 1, 3) == "/ai" then
+    return check_ai(claims, path)
+  end
+
+  -- FHIR branch: the rules below are the /fhir rules, unchanged by the AI route.
+
   -- Rule 1a: only GET. Writes are not offered through this gateway.
   if kong.request.get_method() ~= "GET" then
     return deny(403, "forbidden", "This method is not allowed.")
   end
 
   -- Rule 1b: the path must be exactly /fhir/Patient/<id>. The capture takes one segment with no slash.
-  local id = string.match(kong.request.get_path(), "^/fhir/Patient/([^/]+)$")
+  local id = string.match(path, "^/fhir/Patient/([^/]+)$")
   if not id then
     return deny(403, "forbidden", "Only single Patient reads are allowed.")
   end
@@ -111,9 +147,11 @@ function FhirGuard:header_filter(conf)
   -- "exit" means Kong made this response itself (jwt or our own deny). "service" means the mock answered.
   local source = kong.response.get_source()
 
-  -- Rewrite only Kong-made 401 and 429 answers that are not already FHIR.
-  -- Answers from the mock are never rewritten.
-  local wanted = (status == 401 or status == 429)
+  -- Rewrite only Kong-made 400, 401 and 429 answers that are not already FHIR.
+  -- Kong makes a 400 when ai-prompt-guard blocks a prompt. Kong's body for it is plain JSON, not FHIR,
+  -- so we replace it with one generic OperationOutcome. The client learns nothing about which rule matched.
+  -- Answers from the mock are never rewritten, because their source is "service".
+  local wanted = (status == 400 or status == 401 or status == 429)
   if wanted and source ~= "service" and not string.find(ctype, "application/fhir+json", 1, true) then
     -- Remember for body_filter that this response must be replaced.
     ngx.ctx.fhir_rewrite = status
@@ -134,8 +172,12 @@ function FhirGuard:body_filter(conf)
 
   -- ngx.arg[2] is true on the last piece of the body.
   if ngx.arg[2] then
-    -- Last piece: send the whole OperationOutcome once. 401 means login, 429 means throttled.
-    if status == 401 then
+    -- Last piece: send the whole OperationOutcome once.
+    -- 400 means the gateway rejected the request ("invalid"), 401 means login, 429 means throttled.
+    -- The 400 text is deliberately generic: it does not say which pattern matched.
+    if status == 400 then
+      ngx.arg[1] = outcome("invalid", "The request was rejected by the gateway.")
+    elseif status == 401 then
       ngx.arg[1] = outcome("login", "Missing or invalid bearer token.")
     else
       ngx.arg[1] = outcome("throttled", "Too many requests.")

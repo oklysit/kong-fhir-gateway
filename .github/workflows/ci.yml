@@ -51,14 +51,21 @@ jobs:
       - name: Run end-to-end checks through Kong
         run: bash scripts/e2e.sh
 
+      # The AI route checks, after the FHIR ones. They cover the /ai/chat token, scope, prompt guard,
+      # the key swap to the mock LLM and the AI rate limit. Same style as e2e.sh: first failure stops it.
+      - name: Run AI route checks through Kong
+        run: bash scripts/e2e-ai.sh
+
       # Print the container logs only when an earlier step failed. This shows why the import,
       # the healthcheck, the config render or the gateway check went wrong. Nothing is printed on success.
+      # mock-llm is printed too, so an AI-route failure shows what the mock LLM received and answered.
       - name: Print service logs on failure
         if: failure()
         run: |
           docker compose logs keycloak
           docker compose logs kong-config
           docker compose logs kong
+          docker compose logs mock-llm
 
       # Stop and remove the containers. always() runs this step even when an earlier
       # step failed, so no stack is left running on the runner.

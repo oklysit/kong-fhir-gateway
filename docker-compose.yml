@@ -33,6 +33,33 @@ services:
       # Seconds after start during which failures are ignored, so slow boots are not penalised.
       start_period: 5s
 
+  # Mock LLM: a fake OpenAI-compatible chat server. Kong's ai-proxy calls it on /ai/chat.
+  # It has no key and returns fixed text. Nothing on the host reaches it directly.
+  # Listed above kong, the service that calls it, so the mock's definition comes first in this file.
+  mock-llm:
+    # Build the image from ./mock-llm, which holds the Dockerfile and server.js.
+    build: ./mock-llm
+
+    # No ports: key on purpose. The mock is internal only, reachable by other containers
+    # on the Docker network under the name mock-llm.
+
+    healthcheck:
+      # Same probe style as mock-fhir: node's built-in fetch, since the Alpine image has no curl.
+      # The probe exits 0 on a 2xx response and 1 otherwise.
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8082/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+
+      # Seconds between probes.
+      interval: 5s
+
+      # Seconds one probe may run before it counts as a failure.
+      timeout: 3s
+
+      # Consecutive failures allowed before the container is marked unhealthy.
+      retries: 10
+
+      # Seconds after start during which failures are ignored, so slow boots are not penalised.
+      start_period: 5s
+
   # Keycloak: the login server. It issues the JWTs that mock-fhir's ISSUER points at.
   # Demo only: synthetic users, plain-text dev admin, no TLS.
   keycloak:
@@ -144,6 +171,9 @@ services:
       # Start only after the mock answers its own healthcheck, so no request reaches a dead upstream.
       mock-fhir:
         condition: service_healthy
+      # Start only after the mock LLM answers its healthcheck, so the ai-proxy route never calls a dead upstream.
+      mock-llm:
+        condition: service_healthy
 
     ports:
       # The only published port. Host 8000 to container 8000. Admin and status ports are not published.
@@ -157,32 +187,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-
-  # Mock LLM: a fake OpenAI-compatible chat server. Kong's ai-proxy will call it in PR 7.
-  # It has no key and returns fixed text. Nothing on the host reaches it directly.
-  mock-llm:
-    # Build the image from ./mock-llm, which holds the Dockerfile and server.js.
-    build: ./mock-llm
-
-    # No ports: key on purpose. The mock is internal only, reachable by other containers
-    # on the Docker network under the name mock-llm.
-
-    healthcheck:
-      # Same probe style as mock-fhir: node's built-in fetch, since the Alpine image has no curl.
-      # The probe exits 0 on a 2xx response and 1 otherwise.
-      test: ["CMD", "node", "-e", "fetch('http://localhost:8082/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
-
-      # Seconds between probes.
-      interval: 5s
-
-      # Seconds one probe may run before it counts as a failure.
-      timeout: 3s
-
-      # Consecutive failures allowed before the container is marked unhealthy.
-      retries: 10
-
-      # Seconds after start during which failures are ignored, so slow boots are not penalised.
-      start_period: 5s
 
 # Named volume shared by kong-config (writes kong.yml) and kong (reads it).
 volumes:

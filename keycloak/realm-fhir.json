@@ -36,6 +36,15 @@
         "include.in.token.scope": "true",
         "display.on.consent.screen": "false"
       }
+    },
+    {
+      "name": "ai/chat",
+      "description": "Send a chat request to the AI route (POST /ai/chat)",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
     }
   ],
   "clients": [
@@ -57,7 +66,8 @@
       },
       "optionalClientScopes": [
         "launch/patient",
-        "patient/Patient.read"
+        "patient/Patient.read",
+        "ai/chat"
       ],
       "protocolMappers": [
         {
