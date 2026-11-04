@@ -1,0 +1,54 @@
+# CI workflow: unit tests plus a container check.
+name: ci
+
+# When the workflow runs.
+on:
+  # Every pull request.
+  pull_request:
+  # Pushes to main, for example after a merge.
+  push:
+    branches: [main]
+
+# Least privilege: the workflow token may only read repository contents.
+permissions:
+  contents: read
+
+jobs:
+  # Unit and static tests. Needs no Docker.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Download the repository into the runner.
+      - uses: actions/checkout@v4
+
+      # Install Node 22, the same major version as the container base image.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Runs `node --test`: the 10 mock-fhir tests and the infra checks.
+      - run: npm test
+
+  # Container proof: build the image, start it, and call it over HTTP.
+  # No `needs:` key, so this job runs in parallel with `test`.
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      # Download the repository, which holds docker-compose.yml and mock-fhir/.
+      - uses: actions/checkout@v4
+
+      # Build the image and start the container. --wait blocks until the healthcheck
+      # passes, and the step fails if the container never becomes healthy.
+      - name: Start mock FHIR stack
+        run: docker compose up -d --build --wait
+
+      # Request one Patient through the published port. -f makes curl exit non-zero on
+      # an HTTP error (status 400 or higher). -s hides the progress meter, -S keeps errors visible.
+      - name: Check Patient resource
+        run: curl -fsS localhost:8080/fhir/Patient/patient-1
+
+      # Stop and remove the containers. always() runs this step even when an earlier
+      # step failed, so no stack is left running on the runner.
+      - name: Tear down stack
+        if: always()
+        run: docker compose down
