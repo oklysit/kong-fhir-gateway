@@ -12,9 +12,6 @@ const FILES = {
   ci: ".github/workflows/ci.yml",
 };
 
-// The issuer the token must carry. Compose sets KC_HOSTNAME to this value.
-const ISSUER = "http://localhost:8081/realms/fhir";
-
 // Read a repo file as text. A missing file throws, so the test fails.
 function read(path) {
   return readFileSync(new URL(`./${path}`, import.meta.url), "utf8");
@@ -64,20 +61,13 @@ function findSecrets(node, found = []) {
   return found;
 }
 
-// Files exist: the realm file, the compose keycloak service and the CI token steps.
+// Files exist: the realm file and the compose keycloak service.
 test("keycloak realm file exists", () => {
   assert.ok(existsSync(new URL(`./${FILES.realm}`, import.meta.url)), `missing ${FILES.realm}`);
 });
 
 test("compose defines the keycloak service", () => {
   assert.match(read(FILES.compose), /^\s*keycloak:\s*$/m);
-});
-
-test("CI contains the Keycloak token steps", () => {
-  const text = read(FILES.ci);
-  assert.match(text, /openid-connect\/token/);
-  assert.match(text, /patient-1/);
-  assert.match(text, /patient-2/);
 });
 
 // Realm: the realm itself is `fhir`, enabled, and skips SSL (demo only).
@@ -206,27 +196,7 @@ test("compose mounts the realm file read-only at the import path", () => {
   assert.match(block, /keycloak\/realm-fhir\.json["']?:\/opt\/keycloak\/data\/import\/realm-fhir\.json:ro/);
 });
 
-// CI: the compose job gets the token steps. Each step is a string check on ci.yml.
-test("CI requests a token for ada from the realm token endpoint", () => {
-  const text = read(FILES.ci);
-  assert.match(text, /openid-connect\/token/);
-  assert.match(text, /fhir-demo/);
-  assert.match(text, /launch\/patient/);
-  assert.match(text, /patient\/Patient\.read/);
-});
-
-test("CI decodes the token with jq and checks the issuer", () => {
-  const text = read(FILES.ci);
-  assert.match(text, /\bjq\b/);
-  assert.ok(text.includes(ISSUER), `CI does not check iss = ${ISSUER}`);
-});
-
-test("CI checks the patient claims for ada and ben", () => {
-  const text = read(FILES.ci);
-  assert.match(text, /patient-1/);
-  assert.match(text, /patient-2/);
-});
-
+// CI: the failure logs for the keycloak service. The token checks now live in scripts/e2e.sh.
 test("CI prints keycloak logs on failure", () => {
   const text = read(FILES.ci);
   assert.match(text, /docker compose logs keycloak/);

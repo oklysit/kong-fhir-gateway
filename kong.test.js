@@ -172,6 +172,24 @@ test("template consumer keycloak-fhir has the issuer key, RS256 and the public k
   assert.ok(text.includes(PLACEHOLDER), `template lacks ${PLACEHOLDER}`);
 });
 
+// Rate limiting (PR 5): the fhir route counts requests per consumer, locally, 30 per minute.
+test("template fhir route runs rate-limiting with policy local and minute", () => {
+  const chunks = routeChunks(read(FILES.template));
+  const fhir = chunks.find((chunk) => /\/fhir\b/.test(chunk) && !chunk.includes("smart-configuration"));
+  assert.ok(fhir, "no route for /fhir");
+  assert.match(fhir, /rate-limiting/, "fhir route has no rate-limiting plugin");
+  assert.match(fhir, /policy:\s*["']?local["']?/, "rate-limiting policy is not local");
+  assert.match(fhir, /minute:\s*\d+/, "rate-limiting has no minute limit");
+});
+
+// Plugin order (PR 5): Kong OSS runs plugins by numeric PRIORITY, not by the order listed.
+// The template comment must say so, and must not claim the list order decides.
+test("template comment explains the PRIORITY order and drops the list-order claim", () => {
+  const text = read(FILES.template);
+  assert.match(text, /#[^\n]*PRIORITY/, "no comment mentions PRIORITY");
+  assert.doesNotMatch(text, /run in the order listed/, "comment still says plugins run in the order listed");
+});
+
 test("template service mock-fhir points at http://mock-fhir:8080", () => {
   assert.ok(read(FILES.template).includes("http://mock-fhir:8080"));
 });
@@ -215,6 +233,16 @@ test("handler.lua PRIORITY is lower than the jwt plugin's 1450", () => {
   assert.ok(Number(match[1]) < 1450, `PRIORITY ${match[1]} is not lower than 1450`);
 });
 
+// PR 5: fhir-guard runs before rate-limiting (910), so every authenticated request is counted,
+// including the ones the guard denies. PRIORITY must sit above 0 and below 910.
+test("handler.lua PRIORITY is a number above 0 and below rate-limiting's 910", () => {
+  const match = read(FILES.handler).match(/PRIORITY\s*=\s*(\d+)/);
+  assert.ok(match, "handler.lua has no PRIORITY");
+  const value = Number(match[1]);
+  assert.ok(value > 0, `PRIORITY ${value} is not above 0`);
+  assert.ok(value < 910, `PRIORITY ${value} is not below 910`);
+});
+
 test("handler.lua reads the verified token and its claims", () => {
   const text = read(FILES.handler);
   assert.match(text, /authenticated_jwt_token/);
@@ -246,6 +274,11 @@ test("no PRIVATE KEY string in the PR 4 files", () => {
 // CI: the compose job runs the e2e script, and keeps the failure logs and the teardown.
 test("CI runs scripts/e2e.sh", () => {
   assert.match(read(FILES.ci), /scripts\/e2e\.sh/);
+});
+
+// PR 5: the duplicate Keycloak token steps are gone from CI. scripts/e2e.sh covers them.
+test("CI has no openid-connect/token step (the token steps moved into e2e.sh)", () => {
+  assert.doesNotMatch(read(FILES.ci), /openid-connect\/token/);
 });
 
 test("CI prints kong and kong-config logs on failure", () => {
