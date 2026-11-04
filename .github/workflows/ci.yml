@@ -43,52 +43,11 @@ jobs:
       - name: Start Kong, mock FHIR and Keycloak stack
         run: docker compose up -d --build --wait
 
-      # Ask Keycloak for an access token for ada, using the password grant. The grant needs no
-      # browser, and it is for demo and CI only. The user, client and password are all synthetic.
-      # -f fails the step on an HTTP error. -s hides the progress meter, -S keeps errors visible.
-      # Bash runs with -e here, so a failed curl stops the step before any jq runs on bad data.
-      - name: Request token for ada
-        run: |
-          RESPONSE=$(curl -fsS -X POST http://localhost:8081/realms/fhir/protocol/openid-connect/token \
-            -d grant_type=password \
-            -d client_id=fhir-demo \
-            -d username=ada \
-            -d password=ada \
-            -d 'scope=openid launch/patient patient/Patient.read')
-          # Pull the access_token string out of the JSON response. -r prints it without quotes.
-          TOKEN=$(echo "$RESPONSE" | jq -r .access_token)
-
-          # A JWT has three base64url parts split by dots. The middle part is the payload.
-          # base64url uses - and _ where base64 uses + and /, so swap them back first.
-          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
-          # base64 -d needs the length to be a multiple of 4, so add "=" padding.
-          while [ $(( ${#PAYLOAD} % 4 )) -ne 0 ]; do PAYLOAD="$PAYLOAD="; done
-
-          # Decode the payload. jq -e exits non-zero when the expression is false, which fails the step.
-          # Check the issuer (must match the URL the stack was started with) and the patient claim.
-          echo "$PAYLOAD" | base64 -d | jq -e --arg iss "http://localhost:8081/realms/fhir" \
-            '.iss == $iss and .patient == "patient-1"'
-
-      # Same check for ben, who is linked to patient-2.
-      - name: Request token for ben
-        run: |
-          RESPONSE=$(curl -fsS -X POST http://localhost:8081/realms/fhir/protocol/openid-connect/token \
-            -d grant_type=password \
-            -d client_id=fhir-demo \
-            -d username=ben \
-            -d password=ben \
-            -d 'scope=openid launch/patient patient/Patient.read')
-          TOKEN=$(echo "$RESPONSE" | jq -r .access_token)
-
-          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
-          while [ $(( ${#PAYLOAD} % 4 )) -ne 0 ]; do PAYLOAD="$PAYLOAD="; done
-
-          echo "$PAYLOAD" | base64 -d | jq -e --arg iss "http://localhost:8081/realms/fhir" \
-            '.iss == $iss and .patient == "patient-2"'
-
-      # Run the end-to-end checks through Kong on port 8000. The script covers the 401 and 403
-      # answers, the scope and patient rules, the discovery route, and the closed ports 8080 and 8001.
-      # It exits non-zero on the first failed check, which fails this step.
+      # Run the end-to-end checks through Kong on port 8000. The script requests its own Keycloak
+      # tokens (for ada and ben, password grant, demo and CI only) and checks the token claims.
+      # It covers the 401 and 403 answers, the scope and patient rules, the bypass probes, the
+      # HEAD and OPTIONS denials, the discovery route, the closed ports 8080 and 8001, and the
+      # 429 rate-limit check, which must run last. It exits non-zero on the first failed check.
       - name: Run end-to-end checks through Kong
         run: bash scripts/e2e.sh
 

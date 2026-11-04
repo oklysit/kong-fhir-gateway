@@ -14,8 +14,10 @@ local FhirGuard = {
   VERSION = "0.1.0",
 
   -- Priority decides the order of plugins in the same phase. Higher runs first.
-  -- jwt has PRIORITY 1450. This value is lower, so fhir-guard runs after jwt in the access phase.
-  PRIORITY = 1000,
+  -- jwt has PRIORITY 1450 and rate-limiting has 910. This value is lower than both, so fhir-guard
+  -- runs after them in the access phase. Rate-limiting therefore counts a request before the guard
+  -- can deny it. The value must stay above 0 and below 910.
+  PRIORITY = 900,
 }
 
 -- Build a FHIR OperationOutcome as a JSON string.
