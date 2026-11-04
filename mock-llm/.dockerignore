@@ -1,0 +1,11 @@
+# This file must sit in the build context root (mock-llm/).
+# Docker skips every path listed below when it builds the image.
+
+# Local dependency folder. The mock has none, but a stray copy must not reach the image.
+node_modules
+
+# Git metadata. Not needed at runtime.
+.git
+
+# Test files. The image only needs server.js.
+**/*.test.js
