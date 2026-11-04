@@ -1,4 +1,4 @@
-# Compose file: runs the mock FHIR server and the Keycloak login server.
+# Compose file: runs the mock FHIR server, the Keycloak login server and the Kong gateway in front of them.
 # No top-level "version:" key. Compose v2 ignores it and warns when it is present.
 
 # All containers in this file.
@@ -8,9 +8,8 @@ services:
     # Build the image from ./mock-fhir, which holds the Dockerfile.
     build: ./mock-fhir
 
-    # Publish host port 8080 to container port 8080, written as host:container.
-    ports:
-      - "8080:8080"
+    # No published ports here. Since PR 4 the mock is reachable only inside the Docker network,
+    # through Kong. Host port 8080 was removed on purpose, so the only way in is Kong on 8000.
 
     environment:
       # Issuer URL that the SMART discovery document advertises.
@@ -88,3 +87,77 @@ services:
       # Seconds after start during which failures are ignored. Keycloak takes a while to boot
       # and import the realm, so the first minute does not count against it.
       start_period: 60s
+
+  # One-shot job. It asks Keycloak for the realm's public key and writes the finished Kong
+  # config into a shared volume. It exits when done. Kong starts only after an exit code of 0.
+  kong-config:
+    # Small base image. render.sh needs curl and jq, which the command installs first.
+    image: alpine:3.20
+
+    # Do not ask Keycloak for its key until Keycloak reports healthy.
+    depends_on:
+      keycloak:
+        condition: service_healthy
+
+    volumes:
+      # The kong folder, read-only: the template (kong.yml.tpl) and render.sh.
+      - ./kong:/kong-src:ro
+      # The shared named volume. render.sh writes the rendered kong.yml here.
+      - kong-config:/out
+
+    # Install curl and jq quietly, then run render.sh. The "&&" stops the run if the install fails.
+    command:
+      - sh
+      - -c
+      - apk add --no-cache curl jq >/dev/null && sh /kong-src/render.sh
+
+  # Kong: the API gateway and the only public entry point (host port 8000).
+  # It checks the Keycloak token, enforces scope and patient context, and answers its own
+  # errors as FHIR OperationOutcome. It runs DB-less: it reads one file, the rendered kong.yml.
+  kong:
+    # Exact pinned tag, same reason as Keycloak: "latest" would change behaviour without a commit.
+    image: kong:3.9.4
+
+    environment:
+      # DB-less mode. Kong keeps its config in the declarative file below, not in Postgres.
+      KONG_DATABASE: "off"
+
+      # Where Kong reads its config inside the container. The kong-config job writes this file.
+      KONG_DECLARATIVE_CONFIG: /kong/config/kong.yml
+
+      # "bundled" keeps Kong's own plugins. "fhir-guard" adds our plugin, mounted below.
+      KONG_PLUGINS: bundled,fhir-guard
+
+      # Admin API off. No port is opened for it, so nothing can change the running config.
+      KONG_ADMIN_LISTEN: "off"
+
+    volumes:
+      # Our plugin code. Kong loads plugins from this Lua path. Read-only.
+      - ./kong/plugins/fhir-guard:/usr/local/share/lua/5.1/kong/plugins/fhir-guard:ro
+      # The rendered config from the shared volume. Read-only: Kong only reads it.
+      - kong-config:/kong/config:ro
+
+    depends_on:
+      # Start only after kong-config has written kong.yml and exited with code 0.
+      kong-config:
+        condition: service_completed_successfully
+      # Start only after the mock answers its own healthcheck, so no request reaches a dead upstream.
+      mock-fhir:
+        condition: service_healthy
+
+    ports:
+      # The only published port. Host 8000 to container 8000. Admin and status ports are not published.
+      - "8000:8000"
+
+    healthcheck:
+      # kong-health is a script built into the Kong image. The image has no curl, so this is the probe.
+      # It checks that the nginx workers are running.
+      test: ["CMD", "kong-health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+# Named volume shared by kong-config (writes kong.yml) and kong (reads it).
+volumes:
+  kong-config:
