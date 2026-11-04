@@ -49,8 +49,21 @@ test("compose defines the mock-fhir service", () => {
   assert.match(read(FILES.compose), /^\s*mock-fhir:\s*$/m);
 });
 
-test("compose publishes 8080:8080", () => {
-  assert.match(read(FILES.compose), /8080:8080/);
+// PR 4: Kong is the only way in, so mock-fhir publishes no host port.
+// The check reads only the mock-fhir block and asserts it has no `ports:` key.
+test("compose mock-fhir has no ports: key (internal only)", () => {
+  const lines = read(FILES.compose).split("\n");
+  const start = lines.findIndex((line) => /^  mock-fhir:\s*$/.test(line));
+  assert.ok(start >= 0, "mock-fhir service block not found");
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^(  [A-Za-z][\w-]*:|[A-Za-z])/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  const block = lines.slice(start, end).join("\n");
+  assert.doesNotMatch(block, /^\s*ports:/m, "mock-fhir still publishes ports");
 });
 
 test("compose sets the ISSUER environment variable", () => {
