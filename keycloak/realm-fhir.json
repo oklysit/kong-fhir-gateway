@@ -51,7 +51,7 @@
     {
       "clientId": "fhir-demo",
       "name": "FHIR demo client",
-      "description": "Demo and CI only. The password grant (directAccessGrantsEnabled) lets CI and demo.sh get a token without a browser. A real SMART app uses the auth code + PKCE flow. The audience and client-role mappers below put the account audience and the account client roles in the token, so the same token can call the Keycloak account API (CI uses this to prove a user cannot edit the admin-only patient attribute). The user profile declares patient as admin-only for view and edit, so a user cannot change their own patient claim.",
+      "description": "Demo and CI only. The password grant lets CI and demo.sh get a token without a browser; a real SMART app uses auth code with PKCE. The audience and client-role mappers let this token call the account API, which CI uses to prove patient is admin-only.",
       "enabled": true,
       "publicClient": true,
       "standardFlowEnabled": true,
