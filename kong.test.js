@@ -66,27 +66,28 @@ function portItems(text) {
   return items;
 }
 
-// Split the `routes:` list of the template into one text chunk per route.
+// Split every `routes:` list of the template (one per service) into one text chunk per route.
 // A route starts at the list's own "- " indent and runs to the next route.
 function routeChunks(text) {
   const lines = text.split("\n");
-  const at = lines.findIndex((line) => /^\s*routes:\s*$/.test(line));
-  if (at < 0) return [];
-  const first = lines.findIndex((line, i) => i > at && /^\s*-\s/.test(line));
-  if (first < 0) return [];
-  const indent = lines[first].match(/^(\s*)/)[1];
   const chunks = [];
-  let current = null;
-  for (let i = first; i < lines.length; i++) {
-    const line = lines[i];
-    const lineIndent = line.match(/^(\s*)/)[1];
-    // A non-empty line less indented than the list means the routes list has ended.
-    if (line.trim() !== "" && lineIndent.length < indent.length) break;
-    if (line.startsWith(`${indent}- `)) {
-      current = [];
-      chunks.push(current);
+  for (let at = 0; at < lines.length; at++) {
+    if (!/^\s*routes:\s*$/.test(lines[at])) continue;
+    const first = lines.findIndex((line, i) => i > at && /^\s*-\s/.test(line));
+    if (first < 0) continue;
+    const indent = lines[first].match(/^(\s*)/)[1];
+    let current = null;
+    for (let i = first; i < lines.length; i++) {
+      const line = lines[i];
+      const lineIndent = line.match(/^(\s*)/)[1];
+      // A non-empty line less indented than the list means this routes list has ended.
+      if (line.trim() !== "" && lineIndent.length < indent.length) break;
+      if (line.startsWith(`${indent}- `)) {
+        current = [];
+        chunks.push(current);
+      }
+      if (current) current.push(line);
     }
-    if (current) current.push(line);
   }
   return chunks.map((chunk) => chunk.join("\n"));
 }
