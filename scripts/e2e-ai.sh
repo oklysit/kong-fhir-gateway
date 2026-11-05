@@ -13,7 +13,10 @@ KEYCLOAK="http://localhost:8081"
 # Temporary files for the response body and headers. Removed on exit.
 BODY=$(mktemp)
 HDRS=$(mktemp)
-trap 'rm -f -- "$BODY" "$HDRS"' EXIT
+# PR 10: the raw Kong container log, and only its JSON lines.
+KLOG=$(mktemp)
+KJSON=$(mktemp)
+trap 'rm -f -- "$BODY" "$HDRS" "$KLOG" "$KJSON"' EXIT
 
 # Print a passing check with its label, on one line.
 pass() {
@@ -65,6 +68,17 @@ token_for() {
     -d "password=$1" \
     --data-urlencode "scope=$2" \
     | jq -r '.access_token // empty'
+}
+
+# Read one claim from a JWT payload. Arguments: token, claim name. Prints the value, or nothing.
+# A JWT payload is base64url. Map it to base64, pad it to a multiple of 4, then decode it.
+claim_of() {
+  local payload
+  payload=$(printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+')
+  while [ $(( ${#payload} % 4 )) -ne 0 ]; do
+    payload="$payload="
+  done
+  printf '%s' "$payload" | base64 -d 2>/dev/null | jq -r --arg c "$2" '.[$c] // empty' 2>/dev/null
 }
 
 # True when the last response is a FHIR OperationOutcome with the given issue code.
@@ -199,6 +213,84 @@ if curl -sS -o /dev/null --max-time 5 "http://localhost:8082/" 2>/dev/null; then
   fail "9 localhost:8082 is not reachable (mock LLM not published)" "the mock answered on the host"
 else
   pass "9 localhost:8082 cannot connect (mock LLM not published)"
+fi
+
+# 9b-9e. Audit log (PR 10). These checks read the gateway's own log and send no requests, so they
+# add nothing to the AI budget counted in check 10 (the budget stays at 10, exactly the limit).
+# Field contract of the file-log JSON line:
+#   .request.sub       the token's sub claim (the Keycloak user id)
+#   .request.azp       the token's azp claim (the client)
+#   .request.decision  "allow" or "deny", set by fhir-guard
+#   .request.reason    on a deny: method, path, scope or patient_mismatch
+#   .request.uri, .request.method, .response.status   Kong's own fields
+# They reuse the requests of checks 2 (ben, 403) and 3 (ada, 200). CI has docker; without it they are skipped.
+# Copy the Kong container log into $KLOG and keep only its JSON object lines in $KJSON.
+# Other lines (notices, the access log) are not JSON, and jq drops them. Run from the repo root.
+refresh_kong_log() {
+  docker compose logs --no-color --no-log-prefix kong >"$KLOG" 2>/dev/null || return 1
+  jq -c -R 'fromjson? | select(type == "object")' "$KLOG" >"$KJSON" 2>/dev/null
+}
+
+# True when some JSON log line satisfies a jq condition. Arguments: condition, then extra jq
+# arguments (the arg option with a name and a value). The log may reach docker a moment after the
+# request, so retry for 10 s.
+log_has() {
+  local cond="$1"
+  shift
+  local n
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    if refresh_kong_log && jq -e -s "$@" "any(.[]; $cond)" "$KJSON" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "SKIP  9b-9e audit log checks: docker is not on PATH (CI runs them)"
+else
+  ADA_SUB=$(claim_of "$ADA" sub)
+  BEN_SUB=$(claim_of "$BEN" sub)
+  ADA_AZP=$(claim_of "$ADA" azp)
+  if [ -z "$ADA_SUB" ] || [ -z "$BEN_SUB" ] || [ -z "$ADA_AZP" ]; then
+    fail "9b-9e audit log setup" "a token has no sub or azp claim"
+  fi
+
+  # 9b. ada's allowed POST /ai/chat (check 3) is in the log with her identity and the decision.
+  if log_has '.request.sub == $sub and .request.azp == $azp and .request.decision == "allow"
+      and .request.method == "POST" and .request.uri == "/ai/chat" and .response.status == 200' \
+      --arg sub "$ADA_SUB" --arg azp "$ADA_AZP"; then
+    pass "9b log line: ada POST /ai/chat -> sub, azp, decision allow, status 200"
+  else
+    fail "9b log line for ada's allowed POST /ai/chat" "no JSON line with ada's sub, decision allow and status 200 in docker compose logs kong"
+  fi
+
+  # 9c. ben's POST /ai/chat without the ai/chat scope (check 2) is in the log: deny, reason scope, 403.
+  if log_has '.request.sub == $sub and .request.decision == "deny" and .request.reason == "scope"
+      and .request.method == "POST" and .request.uri == "/ai/chat" and .response.status == 403' \
+      --arg sub "$BEN_SUB"; then
+    pass "9c log line: ben POST /ai/chat -> sub, decision deny, reason scope, status 403"
+  else
+    fail "9c log line for ben's denied POST /ai/chat" "no JSON line with ben's sub, decision deny, reason scope and status 403 in docker compose logs kong"
+  fi
+
+  # 9d. No log line carries an Authorization request header. Header names are compared in lower case.
+  if jq -e -s 'any(.[]; (.request.headers // {}) | keys | map(ascii_downcase) | index("authorization"))' "$KJSON" >/dev/null 2>&1; then
+    fail "9d no Authorization header in the log" "a JSON log line still has request.headers.authorization"
+  fi
+  pass "9d no JSON log line has an Authorization request header"
+
+  # 9e. The word Bearer and the full tokens of ada and ben are absent from the whole log output.
+  # grep -F matches the token as plain text. Only a count is printed, never a line (it could hold a token).
+  refresh_kong_log || fail "9e read the Kong log" "docker compose logs kong failed"
+  if [ "$(grep -c 'Bearer' "$KLOG")" -ne 0 ]; then
+    fail "9e no Bearer in the log" "$(grep -c 'Bearer' "$KLOG") log lines contain the word Bearer"
+  fi
+  if grep -qF -e "$ADA" -e "$BEN" "$KLOG"; then
+    fail "9e no full token in the log" "the log contains the full token of ada or ben"
+  fi
+  pass "9e the Kong log has no Bearer and no full token of ada or ben"
 fi
 
 # 10. LAST: rate limit. Checks 2-8 send AI requests that reach rate-limiting (401s from jwt do

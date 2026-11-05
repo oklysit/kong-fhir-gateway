@@ -390,3 +390,85 @@ test("PR 9: e2e.sh checks the account API and the patient claim after an edit at
   assert.match(text, /realms\/fhir\/account/);
   assert.match(text, /patient-2/);
 });
+
+// PR 10: the gateway's own audit log. fhir-guard records who read what and the decision, and the
+// file-log plugin writes one JSON line per request to the container log.
+// Return the top-level `plugins:` section of the template (a plugin that applies to every route).
+function globalPlugins(text) {
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => /^plugins:\s*$/.test(line));
+  if (start < 0) return "";
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^[A-Za-z_]/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n");
+}
+
+// The file-log plugin that applies to one route: its own, or the global one.
+function fileLogFor(chunk) {
+  return pluginBlock(chunk, "file-log") || pluginBlock(globalPlugins(read(FILES.template)), "file-log");
+}
+
+// Keep only non-comment lines, so a comment cannot satisfy a check.
+function withoutComments(text) {
+  return text
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("#"))
+    .join("\n");
+}
+
+// Find the template chunk of the FHIR route and of the AI route.
+function fhirChunk() {
+  return routeChunks(read(FILES.template)).find((chunk) => /\/fhir\b/.test(chunk) && !chunk.includes("smart-configuration"));
+}
+function aiChunk() {
+  return routeChunks(read(FILES.template)).find((chunk) => chunk.includes("/ai/chat"));
+}
+
+test("PR 10: the fhir route runs file-log with path /dev/stdout", () => {
+  const fhir = fhirChunk();
+  assert.ok(fhir, "no route for /fhir");
+  const block = fileLogFor(fhir);
+  assert.ok(block, "no file-log plugin on the fhir route or globally");
+  assert.match(block, /^\s*path:\s*["']?\/dev\/stdout["']?\s*(#.*)?$/m, "file-log path is not /dev/stdout");
+});
+
+test("PR 10: the ai-chat route runs file-log with path /dev/stdout", () => {
+  const ai = aiChunk();
+  assert.ok(ai, "no route for /ai/chat");
+  const block = fileLogFor(ai);
+  assert.ok(block, "no file-log plugin on the ai-chat route or globally");
+  assert.match(block, /^\s*path:\s*["']?\/dev\/stdout["']?\s*(#.*)?$/m, "file-log path is not /dev/stdout");
+});
+
+// file-log writes the request headers by default, and a Bearer token would land in the log.
+// The Authorization header must be removed, in the plugin config or by the handler.
+test("PR 10: the log strips the Authorization header (plugin config or handler)", () => {
+  const handler = withoutComments(read(FILES.handler));
+  const handlerStrips = /set_serialize_value[\s\S]{0,80}authorization/i.test(handler);
+  for (const [name, chunk] of [["fhir", fhirChunk()], ["ai-chat", aiChunk()]]) {
+    assert.ok(chunk, `no ${name} route`);
+    const block = withoutComments(fileLogFor(chunk));
+    assert.ok(block, `no file-log plugin for the ${name} route`);
+    assert.ok(/authorization/i.test(block) || handlerStrips, `nothing strips the Authorization header on the ${name} route`);
+  }
+});
+
+// The handler records the identity and the decision. The e2e scripts read these exact field names
+// from the JSON line: request.sub, request.patient, request.azp, request.decision, request.reason.
+test("PR 10: handler.lua sets the serialized log fields sub, patient, azp and decision", () => {
+  const text = withoutComments(read(FILES.handler));
+  assert.match(text, /set_serialize_value/, "handler.lua never calls set_serialize_value");
+  for (const field of ["sub", "patient", "azp", "decision", "reason"]) {
+    assert.match(text, new RegExp(`["']request\\.${field}["']`), `handler.lua sets no request.${field}`);
+  }
+  assert.match(text, /["']allow["']/, "handler.lua never records the decision allow");
+  assert.match(text, /["']deny["']/, "handler.lua never records the decision deny");
+  assert.match(text, /["']patient_mismatch["']/, "handler.lua has no patient_mismatch reason code");
+  // Only the four claims go into the log. The raw token must never be passed to a serialized value.
+  assert.doesNotMatch(text, /set_serialize_value\s*\([^)]*(authenticated_jwt_token|\btoken\b)/, "handler.lua logs the token");
+});

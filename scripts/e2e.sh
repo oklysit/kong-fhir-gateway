@@ -13,7 +13,10 @@ KEYCLOAK="http://localhost:8081"
 # Temporary files for the response body and headers. Removed on exit.
 BODY=$(mktemp)
 HDRS=$(mktemp)
-trap 'rm -f -- "$BODY" "$HDRS"' EXIT
+# PR 10: the raw Kong container log, and only its JSON lines.
+KLOG=$(mktemp)
+KJSON=$(mktemp)
+trap 'rm -f -- "$BODY" "$HDRS" "$KLOG" "$KJSON"' EXIT
 
 # Print a passing check with its label, on one line.
 pass() {
@@ -52,6 +55,17 @@ token_for() {
     -d "password=$1" \
     --data-urlencode "scope=$2" \
     | jq -r '.access_token // empty'
+}
+
+# Read one claim from a JWT payload. Arguments: token, claim name. Prints the value, or nothing.
+# A JWT payload is base64url. Map it to base64, pad it to a multiple of 4, then decode it.
+claim_of() {
+  local payload
+  payload=$(printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+')
+  while [ $(( ${#payload} % 4 )) -ne 0 ]; do
+    payload="$payload="
+  done
+  printf '%s' "$payload" | base64 -d 2>/dev/null | jq -r --arg c "$2" '.[$c] // empty' 2>/dev/null
 }
 
 # True when the last response is a FHIR OperationOutcome with the given issue code.
@@ -241,6 +255,90 @@ write_probe "15b ada PUT /fhir/Patient/patient-1" PUT
 write_probe "15c ada PATCH /fhir/Patient/patient-1" PATCH
 write_probe "15d ada DELETE /fhir/Patient/patient-1" DELETE
 
+# PR 10: audit log helpers. The checks below read the gateway's own log and send no requests,
+# so they add nothing to the rate-limit budget of check 18.
+# Copy the Kong container log into $KLOG and keep only its JSON object lines in $KJSON.
+# Kong's file-log plugin writes one JSON object per request. Other lines (notices, the access
+# log) are not JSON, and jq drops them. Run from the repo root, where docker compose finds the stack.
+refresh_kong_log() {
+  docker compose logs --no-color --no-log-prefix kong >"$KLOG" 2>/dev/null || return 1
+  jq -c -R 'fromjson? | select(type == "object")' "$KLOG" >"$KJSON" 2>/dev/null
+}
+
+# True when some JSON log line satisfies a jq condition. Arguments: condition, then extra jq
+# arguments (the arg option with a name and a value). The log may reach docker a moment after the request, so retry for 10 s.
+log_has() {
+  local cond="$1"
+  shift
+  local n
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    if refresh_kong_log && jq -e -s "$@" "any(.[]; $cond)" "$KJSON" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# 15e-15h. Audit log (PR 10). Field contract of the file-log JSON line:
+#   .request.sub       the token's sub claim (the Keycloak user id)
+#   .request.patient   the token's patient claim
+#   .request.azp       the token's azp claim (the client)
+#   .request.decision  "allow" or "deny", set by fhir-guard
+#   .request.reason    on a deny: method, path, scope or patient_mismatch
+#   .request.uri, .request.method, .response.status   Kong's own fields
+# These reuse requests from checks 1, 2, 4 and 6b. CI has docker; without it the checks are skipped.
+if ! command -v docker >/dev/null 2>&1; then
+  echo "SKIP  15e-15h audit log checks: docker is not on PATH (CI runs them)"
+else
+  ADA_SUB=$(claim_of "$ADA" sub)
+  BEN_SUB=$(claim_of "$BEN" sub)
+  ADA_AZP=$(claim_of "$ADA" azp)
+  if [ -z "$ADA_SUB" ] || [ -z "$BEN_SUB" ] || [ -z "$ADA_AZP" ]; then
+    fail "15e-15h audit log setup" "a token has no sub or azp claim"
+  fi
+
+  # 15e. ada's allowed read of patient-1 (check 4) is in the log with her identity and the decision.
+  if log_has '.request.sub == $sub and .request.patient == "patient-1" and .request.azp == $azp
+      and .request.decision == "allow" and .request.method == "GET"
+      and .request.uri == "/fhir/Patient/patient-1" and .response.status == 200' \
+      --arg sub "$ADA_SUB" --arg azp "$ADA_AZP"; then
+    pass "15e log line: ada GET /fhir/Patient/patient-1 -> sub, patient-1, azp, decision allow, status 200"
+  else
+    fail "15e log line for ada's allowed read of patient-1" "no JSON line with ada's sub, patient-1, decision allow and status 200 in docker compose logs kong"
+  fi
+
+  # 15f. ben's denied read of patient-1 (check 6b) is in the log with his identity, his own patient
+  # claim (patient-2, not the patient he asked for), decision deny and the reason patient_mismatch.
+  if log_has '.request.sub == $sub and .request.patient == "patient-2"
+      and .request.decision == "deny" and .request.reason == "patient_mismatch"
+      and .request.uri == "/fhir/Patient/patient-1" and .response.status == 403' \
+      --arg sub "$BEN_SUB"; then
+    pass "15f log line: ben GET /fhir/Patient/patient-1 -> sub, patient-2, decision deny, reason patient_mismatch, status 403"
+  else
+    fail "15f log line for ben's denied read of patient-1" "no JSON line with ben's sub, decision deny, reason patient_mismatch and status 403 in docker compose logs kong"
+  fi
+
+  # 15g. No log line carries an Authorization request header (check 2 sent a Bearer header).
+  # Header names are compared in lower case, because HTTP header names are not case sensitive.
+  if jq -e -s 'any(.[]; (.request.headers // {}) | keys | map(ascii_downcase) | index("authorization"))' "$KJSON" >/dev/null 2>&1; then
+    fail "15g no Authorization header in the log" "a JSON log line still has request.headers.authorization"
+  fi
+  pass "15g no JSON log line has an Authorization request header"
+
+  # 15h. The word Bearer and the full tokens of ada and ben are absent from the whole log output.
+  # grep -F matches the token as plain text. Only a count is printed, never a line (it could hold a token).
+  # This runs before 16a and 16b, which put a token in the URL on purpose and so into the access log.
+  refresh_kong_log || fail "15h read the Kong log" "docker compose logs kong failed"
+  if [ "$(grep -c 'Bearer' "$KLOG")" -ne 0 ]; then
+    fail "15h no Bearer in the log" "$(grep -c 'Bearer' "$KLOG") log lines contain the word Bearer"
+  fi
+  if grep -qF -e "$ADA" -e "$BEN" "$KLOG"; then
+    fail "15h no full token in the log" "the log contains the full token of ada or ben"
+  fi
+  pass "15h the Kong log has no Bearer and no full token of ada or ben"
+fi
+
 # 16a. A valid token in the URL (?jwt=) and no Authorization header -> 401. Kong must read the
 # token from the header only. Check 4 proves the same token works in the header.
 STATUS=$(curl -sS -o "$BODY" -D "$HDRS" -w '%{http_code}' "$KONG/fhir/Patient/patient-1?jwt=$ADA") || STATUS=000
@@ -262,17 +360,6 @@ if [ "$STATUS" = "401" ] && is_outcome login; then
 else
   fail "16b valid token in ?jwt= on POST /ai/chat, no header -> 401" "status $STATUS, content-type '$CTYPE'"
 fi
-
-# Read one claim from a JWT payload. Arguments: token, claim name. Prints the value, or nothing.
-# A JWT payload is base64url. Map it to base64, pad it to a multiple of 4, then decode it.
-claim_of() {
-  local payload
-  payload=$(printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+')
-  while [ $(( ${#payload} % 4 )) -ne 0 ]; do
-    payload="$payload="
-  done
-  printf '%s' "$payload" | base64 -d 2>/dev/null | jq -r --arg c "$2" '.[$c] // empty' 2>/dev/null
-}
 
 # Call the Keycloak account API with a bearer token. Arguments: method, token, JSON body (optional).
 # Sets STATUS and leaves the body in $BODY. This API is how a user edits their own profile.
@@ -367,6 +454,7 @@ fi
 #   checks 13 and 14                    =  2
 #   checks 15a-15d (POST, PUT, PATCH, DELETE) = 4
 #   total before the loop               = 20, under the limit of 30
+# The audit log checks 15e-15h read the log and send no requests, so the total stays 20.
 # So requests 1 to 10 of the loop get an answer, and request 11 is the first 429. The loop allows
 # 45, so a window change during the run (the counter resets) still leaves one window over 30:
 # 20 + 45 = 65 requests in at most two windows.
