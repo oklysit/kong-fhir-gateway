@@ -326,17 +326,23 @@ else
   fi
   pass "15g no JSON log line has an Authorization request header"
 
-  # 15h. The word Bearer and the full tokens of ada and ben are absent from the whole log output.
-  # grep -F matches the token as plain text. Only a count is printed, never a line (it could hold a token).
+  # 15h. No Bearer token value and no full token of ada or ben appears in the whole log output.
+  # grep -F matches the token as plain text. Offending lines print only after redaction.
   # This runs before 16a and 16b, which put a token in the URL on purpose and so into the access log.
   refresh_kong_log || fail "15h read the Kong log" "docker compose logs kong failed"
-  if [ "$(grep -c 'Bearer' "$KLOG")" -ne 0 ]; then
-    fail "15h no Bearer in the log" "$(grep -c 'Bearer' "$KLOG") log lines contain the word Bearer"
+  # A legitimate WWW-Authenticate: Bearer realm header is fine. A leak is Bearer followed by a token-looking value.
+  # On failure each offending line is redacted (any 20+ character token-like run) and cut to about 120 characters.
+  if grep -qE 'Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}' "$KLOG"; then
+    echo "Lines with Bearer and a token-looking value (redacted):"
+    grep -E 'Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}' "$KLOG" \
+      | sed -E 's/[A-Za-z0-9._~+\/=-]{20,}/<redacted>/g' \
+      | grep -oE '.{0,50}Bearer[[:space:]]+<redacted>.{0,50}' | head -n 10
+    fail "15h no Bearer token in the log" "$(grep -cE 'Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{20,}' "$KLOG") log lines contain Bearer followed by a token-looking value"
   fi
   if grep -qF -e "$ADA" -e "$BEN" "$KLOG"; then
     fail "15h no full token in the log" "the log contains the full token of ada or ben"
   fi
-  pass "15h the Kong log has no Bearer and no full token of ada or ben"
+  pass "15h the Kong log has no Bearer token and no full token of ada or ben"
 fi
 
 # 16a. A valid token in the URL (?jwt=) and no Authorization header -> 401. Kong must read the
