@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: 22
 
-      # Runs `node --test`: the mock-fhir tests, the infra checks and the Keycloak checks.
+      # Runs `node --test`: behavioral tests for the mock servers and static checks of the config files. Neither runs Kong or Keycloak.
       - run: npm test
 
   # Container proof: build the image, start the stack, and check it end to end through Kong.
@@ -46,13 +46,15 @@ jobs:
       # Run the end-to-end checks through Kong on port 8000. The script requests its own Keycloak
       # tokens (for ada and ben, password grant, demo and CI only) and checks the token claims.
       # It covers the 401 and 403 answers, the scope and patient rules, the bypass probes, the
-      # HEAD and OPTIONS denials, the discovery route, the closed ports 8080 and 8001, and the
-      # 429 rate-limit check, which must run last. It exits non-zero on the first failed check.
+      # HEAD and OPTIONS denials, the POST, PUT, PATCH and DELETE denials, the token-in-URL 401s,
+      # the check that a user cannot change their own patient claim through the Keycloak account API,
+      # the discovery route, the closed ports 8080 and 8001, and the 429 rate-limit check, which
+      # must run last. It exits non-zero on the first failed check.
       - name: Run end-to-end checks through Kong
         run: bash scripts/e2e.sh
 
-      # The AI route checks, after the FHIR ones. They cover the /ai/chat token, scope, prompt guard,
-      # the key swap to the mock LLM and the AI rate limit. Same style as e2e.sh: first failure stops it.
+      # The AI route checks, after the FHIR ones. They cover the /ai/chat token, scope, prompt guard
+      # (injection and SSN in user, system and assistant messages), the key swap to the mock LLM and the AI rate limit. Same style as e2e.sh: first failure stops it.
       - name: Run AI route checks through Kong
         run: bash scripts/e2e-ai.sh
 

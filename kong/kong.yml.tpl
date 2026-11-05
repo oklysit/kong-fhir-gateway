@@ -36,6 +36,10 @@ services:
             config:
               # Look up the consumer by the token's "iss" claim (the issuer URL).
               key_claim_name: iss
+              # Read the token from the Authorization header only. The plugin default also reads a "jwt"
+              # query parameter, which would put a live token in URLs, logs and referrer headers.
+              # An empty list turns the query parameter off, so ?jwt=<token> without a header gets 401.
+              uri_param_names: []
               # Check the "exp" claim, so an expired token is rejected.
               claims_to_verify:
                 - exp
@@ -78,6 +82,10 @@ services:
             config:
               # Look up the consumer by the token's "iss" claim (the issuer URL).
               key_claim_name: iss
+              # Read the token from the Authorization header only. The plugin default also reads a "jwt"
+              # query parameter, which would put a live token in URLs, logs and referrer headers.
+              # An empty list turns the query parameter off, so ?jwt=<token> without a header gets 401.
+              uri_param_names: []
               # Check the "exp" claim, so an expired token is rejected.
               claims_to_verify:
                 - exp
@@ -102,6 +110,9 @@ services:
               # false: every user message in the conversation is checked, not only the newest one.
               # An injection in an earlier turn still blocks the request.
               allow_all_conversation_history: false
+              # true: check messages of every role (system, assistant and user), not only user messages.
+              # Without this, an injection phrase or an SSN in a system or assistant message passes.
+              match_all_roles: true
               # Size cap for the body the guard inspects, in bytes (8 KB).
               max_request_body_size: 8192
               deny_patterns:
@@ -128,7 +139,9 @@ services:
                 # false: a caller cannot supply its own Authorization header to replace the internal key.
                 allow_override: false
               logging:
-                # Add token counts and latency to Kong's access log.
+                # Ask ai-proxy to collect token counts and latency for Kong's logging plugins. No logging plugin
+                # is configured here, and the default access log format has no AI fields, so nothing from
+                # this setting reaches a log today. Add a log plugin to make use of the numbers.
                 log_statistics: true
                 # false: prompts and answers are never written to the log, so no patient text lands there.
                 log_payloads: false

@@ -12,7 +12,7 @@
         "providerId": "declarative-user-profile",
         "config": {
           "kc.user.profile.config": [
-            "{\"unmanagedAttributePolicy\":\"ENABLED\"}"
+            "{\"unmanagedAttributePolicy\":\"ADMIN_EDIT\",\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":3,\"max\":255},\"username-prohibited-characters\":{},\"up-username-not-idn-homograph\":{}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"patient\",\"displayName\":\"Patient\",\"permissions\":{\"view\":[\"admin\"],\"edit\":[\"admin\"]},\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"}]}"
           ]
         }
       }
@@ -51,7 +51,7 @@
     {
       "clientId": "fhir-demo",
       "name": "FHIR demo client",
-      "description": "Demo and CI only. The password grant (directAccessGrantsEnabled) lets CI and demo.sh get a token without a browser. A real SMART app uses the auth code + PKCE flow.",
+      "description": "Demo and CI only. The password grant (directAccessGrantsEnabled) lets CI and demo.sh get a token without a browser. A real SMART app uses the auth code + PKCE flow. The audience and client-role mappers below put the account audience and the account client roles in the token, so the same token can call the Keycloak account API (CI uses this to prove a user cannot edit the admin-only patient attribute). The user profile declares patient as admin-only for view and edit, so a user cannot change their own patient claim.",
       "enabled": true,
       "publicClient": true,
       "standardFlowEnabled": true,
@@ -84,6 +84,32 @@
             "access.token.claim": "true",
             "userinfo.token.claim": "false"
           }
+        },
+        {
+          "name": "account-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "account",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "account-client-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "usermodel.clientRoleMapping.clientId": "account",
+            "claim.name": "resource_access.account.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
         }
       ]
     }
@@ -91,6 +117,8 @@
   "users": [
     {
       "username": "ada",
+      "firstName": "Ada",
+      "lastName": "Example",
       "email": "ada@example.test",
       "emailVerified": true,
       "enabled": true,
@@ -110,6 +138,8 @@
     },
     {
       "username": "ben",
+      "firstName": "Ben",
+      "lastName": "Sample",
       "email": "ben@example.test",
       "emailVerified": true,
       "enabled": true,
