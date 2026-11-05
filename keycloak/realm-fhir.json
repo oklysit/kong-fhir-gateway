@@ -123,6 +123,12 @@
       "emailVerified": true,
       "enabled": true,
       "requiredActions": [],
+      "clientRoles": {
+        "account": [
+          "view-profile",
+          "manage-account"
+        ]
+      },
       "attributes": {
         "patient": [
           "patient-1"
@@ -144,6 +150,12 @@
       "emailVerified": true,
       "enabled": true,
       "requiredActions": [],
+      "clientRoles": {
+        "account": [
+          "view-profile",
+          "manage-account"
+        ]
+      },
       "attributes": {
         "patient": [
           "patient-2"
