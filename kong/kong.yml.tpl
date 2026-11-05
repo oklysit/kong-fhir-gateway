@@ -28,6 +28,7 @@ services:
         strip_path: false
         # Kong OSS runs plugins by their numeric PRIORITY (higher runs first), not in the order listed here.
         # Priorities on this route: jwt 1450, rate-limiting 910, fhir-guard 900 (PRIORITY in handler.lua).
+        # file-log (PRIORITY 9) runs in the log phase, after the response, so it sees every outcome.
         # The order is deliberate: rate-limiting runs before fhir-guard, so a request the guard denies
         # still counts toward the limit. Only requests that pass jwt are counted, because jwt runs first.
         plugins:
@@ -59,6 +60,23 @@ services:
           # Step 3 (runs at PRIORITY 900, after rate-limiting): our own rules (method, path, scope, patient).
           # Runs only after jwt accepts the token. A request it denies has already been counted above.
           - name: fhir-guard
+          # Step 4 (PRIORITY 9, log phase, after the response): write one JSON line per request to the
+          # container log. fhir-guard adds request.sub, request.patient, request.azp, request.decision
+          # and request.reason to that line. Requests that jwt or rate-limiting refuse are logged too,
+          # but they never reach fhir-guard, so those lines have no decision.
+          - name: file-log
+            config:
+              # /dev/stdout is the Kong container's standard output, so "docker compose logs kong" shows the lines.
+              path: /dev/stdout
+              # false: keep the file open between requests. Reopening on every request is only needed to rotate a real file.
+              reopen: false
+              # Each entry is a name and a small Lua snippet. Kong runs the snippet for every request and
+              # stores the result under that name in the log line. "return nil" removes the field.
+              # Kong 3.9.4 already replaces the Authorization header with the word REDACTED, but the key
+              # would still be in the line. These entries remove the keys, so the header is not in the log at all.
+              custom_fields_by_lua:
+                request.headers.authorization: "return nil"
+                request.headers.proxy-authorization: "return nil"
 
   # The mock LLM: the AI service. Like mock-fhir, it sits on the Docker network only (not published).
   - name: mock-llm
@@ -103,6 +121,23 @@ services:
               fault_tolerant: true
           # Step 3 (PRIORITY 900): our own rules. On this route it checks POST, the exact path, and the ai/chat scope.
           - name: fhir-guard
+          # Step 3b (PRIORITY 9, log phase, after the response): write one JSON line per request to the
+          # container log. fhir-guard adds request.sub, request.patient, request.azp, request.decision
+          # and request.reason to that line. Requests that jwt or rate-limiting refuse are logged too,
+          # but they never reach fhir-guard, so those lines have no decision.
+          - name: file-log
+            config:
+              # /dev/stdout is the Kong container's standard output, so "docker compose logs kong" shows the lines.
+              path: /dev/stdout
+              # false: keep the file open between requests. Reopening on every request is only needed to rotate a real file.
+              reopen: false
+              # Each entry is a name and a small Lua snippet. Kong runs the snippet for every request and
+              # stores the result under that name in the log line. "return nil" removes the field.
+              # Kong 3.9.4 already replaces the Authorization header with the word REDACTED, but the key
+              # would still be in the line. These entries remove the keys, so the header is not in the log at all.
+              custom_fields_by_lua:
+                request.headers.authorization: "return nil"
+                request.headers.proxy-authorization: "return nil"
           # Step 4 (PRIORITY 771): scan the prompt. Single quotes keep each backslash literal, so the regex
           # reaches Kong unchanged. A double-quoted string would turn \s and \d into bad escapes.
           - name: ai-prompt-guard
@@ -139,9 +174,9 @@ services:
                 # false: a caller cannot supply its own Authorization header to replace the internal key.
                 allow_override: false
               logging:
-                # Ask ai-proxy to collect token counts and latency for Kong's logging plugins. No logging plugin
-                # is configured here, and the default access log format has no AI fields, so nothing from
-                # this setting reaches a log today. Add a log plugin to make use of the numbers.
+                # Ask ai-proxy to collect token counts and latency for Kong's logging plugins. The file-log
+                # plugin on this route writes them into the JSON line (the ai.proxy fields). The default
+                # access log has no AI fields.
                 log_statistics: true
                 # false: prompts and answers are never written to the log, so no patient text lands there.
                 log_payloads: false

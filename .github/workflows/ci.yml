@@ -48,13 +48,15 @@ jobs:
       # It covers the 401 and 403 answers, the scope and patient rules, the bypass probes, the
       # HEAD and OPTIONS denials, the POST, PUT, PATCH and DELETE denials, the token-in-URL 401s,
       # the check that a user cannot change their own patient claim through the Keycloak account API,
-      # the discovery route, the closed ports 8080 and 8001, and the 429 rate-limit check, which
-      # must run last. It exits non-zero on the first failed check.
+      # the audit log lines in `docker compose logs kong` (who read what, the allow or deny decision,
+      # and no Authorization header or token in the log), the discovery route, the closed ports 8080
+      # and 8001, and the 429 rate-limit check, which must run last. It exits non-zero on the first failed check.
       - name: Run end-to-end checks through Kong
         run: bash scripts/e2e.sh
 
       # The AI route checks, after the FHIR ones. They cover the /ai/chat token, scope, prompt guard
-      # (injection and SSN in user, system and assistant messages), the key swap to the mock LLM and the AI rate limit. Same style as e2e.sh: first failure stops it.
+      # (injection and SSN in user, system and assistant messages), the key swap to the mock LLM, the audit log lines
+      # for the allowed and the denied call, and the AI rate limit. Same style as e2e.sh: first failure stops it.
       - name: Run AI route checks through Kong
         run: bash scripts/e2e-ai.sh
 

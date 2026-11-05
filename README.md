@@ -166,11 +166,17 @@ Kong intercepts the request at `ai-prompt-guard`, and `fhir-guard` rewrites the 
   <td><code>/ai/chat</code></td>
   <td>Translates chat completion requests to mock LLM endpoint, replacing caller credentials with internal upstream key (<code>allow_override: false</code>, <code>log_payloads: false</code>).</td>
 </tr>
+<tr>
+  <td><code>file-log</code> (OSS)</td>
+  <td>9</td>
+  <td><code>/fhir</code>, <code>/ai/chat</code></td>
+  <td>Writes one JSON line per request to the container log (<code>/dev/stdout</code>). The line holds the token <code>sub</code>, <code>patient</code> and <code>azp</code> claims and the <code>fhir-guard</code> decision (<code>allow</code> or <code>deny</code> with a reason code), plus Kong's own method, URI, status and latencies. The Authorization header is removed from the line.</td>
+</tr>
 </table>
 
 ## Tests and CI
 
-`npm test` runs 141 local tests on the Node 22 native test runner with zero dependencies. They split into two kinds. 28 are behavioral unit tests that start the mock FHIR and mock LLM servers and call them over HTTP. 113 are static config checks that read the repository files as text (Kong template, realm, compose, CI, scripts) and do not run Kong, Keycloak or Docker. The static checks catch a removed setting but do not prove the gateway behaves correctly. That proof is the third kind, the end-to-end checks in `scripts/e2e.sh` and `scripts/e2e-ai.sh`, which run in CI against the real stack.
+`npm test` runs 145 local tests on the Node 22 native test runner with zero dependencies. They split into two kinds. 28 are behavioral unit tests that start the mock FHIR and mock LLM servers and call them over HTTP. 117 are static config checks that read the repository files as text (Kong template, realm, compose, CI, scripts) and do not run Kong, Keycloak or Docker. The static checks catch a removed setting but do not prove the gateway behaves correctly. That proof is the third kind, the end-to-end checks in `scripts/e2e.sh` and `scripts/e2e-ai.sh`, which run in CI against the real stack.
 
 ```bash
 npm test
@@ -194,6 +200,7 @@ Both checks are configured as required status checks on `main`.
 8. Plain HTTP communication inside Docker network and localhost (no TLS termination configured).
 9. Docker Compose orchestration only; no Kubernetes manifests or Helm charts provided.
 10. Mock FHIR server supports only single Patient read and searchset operations.
+11. The audit trail is the JSON log written to container stdout. It has no retention, no tamper protection and no durable storage. The `sub` is an opaque Keycloak user id. A request that jwt or rate-limiting refuses has no guard decision in its line. See `docs/governance.md`.
 
 ## Enterprise-Only Features
 
