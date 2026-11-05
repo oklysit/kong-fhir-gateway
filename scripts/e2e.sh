@@ -13,7 +13,7 @@ KEYCLOAK="http://localhost:8081"
 # Temporary files for the response body and headers. Removed on exit.
 BODY=$(mktemp)
 HDRS=$(mktemp)
-# PR 10: the raw Kong container log, and only its JSON lines.
+# The raw Kong container log, and only its JSON lines.
 KLOG=$(mktemp)
 KJSON=$(mktemp)
 trap 'rm -f -- "$BODY" "$HDRS" "$KLOG" "$KJSON"' EXIT
@@ -255,7 +255,7 @@ write_probe "15b ada PUT /fhir/Patient/patient-1" PUT
 write_probe "15c ada PATCH /fhir/Patient/patient-1" PATCH
 write_probe "15d ada DELETE /fhir/Patient/patient-1" DELETE
 
-# PR 10: audit log helpers. The checks below read the gateway's own log and send no requests,
+# Audit log helpers. The checks below read the gateway's own log and send no requests,
 # so they add nothing to the rate-limit budget of check 18.
 # Copy the Kong container log into $KLOG and keep only its JSON object lines in $KJSON.
 # Kong's file-log plugin writes one JSON object per request. Other lines (notices, the access
@@ -280,7 +280,7 @@ log_has() {
   return 1
 }
 
-# 15e-15h. Audit log (PR 10). Field contract of the file-log JSON line:
+# 15e-15h. Audit log. Field contract of the file-log JSON line:
 #   .request.sub       the token's sub claim (the Keycloak user id)
 #   .request.patient   the token's patient claim
 #   .request.azp       the token's azp claim (the client)
