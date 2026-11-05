@@ -94,23 +94,31 @@ local function has_scope(scope_string, wanted)
 end
 
 -- Rules for the AI route. Deny by default: only POST on exactly /ai/chat, with the ai/chat scope.
--- Returns nothing when every rule passes, so the request goes on to ai-prompt-guard and ai-proxy.
+-- Returns true when every rule passes, so the request goes on to ai-prompt-guard and ai-proxy.
+-- Returns false when a rule fails. The answer has already been sent and the decision recorded
+-- (deny does both), so the caller only has to stop.
 local function check_ai(claims, path)
   -- Rule A1: only POST. Kong's route also matches GET, and GET is not offered for chat.
   if kong.request.get_method() ~= "POST" then
-    return deny(403, "forbidden", "This method is not allowed.", "method")
+    deny(403, "forbidden", "This method is not allowed.", "method")
+    return false
   end
 
   -- Rule A2: the path must be exactly /ai/chat. Kong matches routes by prefix, so /ai/chat/extra
   -- reaches this plugin. The exact comparison refuses it.
   if path ~= "/ai/chat" then
-    return deny(403, "forbidden", "Only /ai/chat is allowed.", "path")
+    deny(403, "forbidden", "Only /ai/chat is allowed.", "path")
+    return false
   end
 
   -- Rule B: the token must carry the ai/chat scope as a whole word.
   if not has_scope(claims.scope, "ai/chat") then
-    return deny(403, "forbidden", "The token does not allow AI operations.", "scope")
+    deny(403, "forbidden", "The token does not allow AI operations.", "scope")
+    return false
   end
+
+  -- Every rule passed.
+  return true
 end
 
 -- Access phase: runs for every request that reaches the fhir or ai route, after jwt has accepted the token.
@@ -141,9 +149,12 @@ function FhirGuard:access(conf)
   -- AI branch: every path that starts with /ai. string.sub compares plain text, so no escaping is needed.
   -- Anything under /ai that is not exactly /ai/chat is denied inside check_ai.
   if string.sub(path, 1, 3) == "/ai" then
-    -- check_ai ends the request itself when a rule fails (deny calls kong.response.exit and does not return).
-    -- If it returns, all AI rules passed.
-    check_ai(claims, path)
+    -- check_ai returns false when a rule failed. It has then already recorded the deny and sent the answer,
+    -- so stop here and do not record an allow.
+    if not check_ai(claims, path) then
+      return
+    end
+    -- All AI rules passed. Record the allow, then return nothing, so the request goes on to ai-prompt-guard.
     record_decision("allow")
     return
   end

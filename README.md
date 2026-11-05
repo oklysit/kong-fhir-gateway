@@ -200,7 +200,7 @@ Both checks are configured as required status checks on `main`.
 8. Plain HTTP communication inside Docker network and localhost (no TLS termination configured).
 9. Docker Compose orchestration only; no Kubernetes manifests or Helm charts provided.
 10. Mock FHIR server supports only single Patient read and searchset operations.
-11. The audit trail is the JSON log written to container stdout. It has no retention, no tamper protection and no durable storage. The `sub` is an opaque Keycloak user id. A request that jwt or rate-limiting refuses has no guard decision in its line. See `docs/governance.md`.
+11. The audit trail is the JSON log written to container stdout. It has no retention, no tamper protection and no durable storage. The `sub` is an opaque Keycloak user id. A request that jwt or rate-limiting refuses has no guard decision in its line. A token sent in the URL (`?jwt=`) is rejected with 401, but its URL still lands in the logged URI and query string, the same limit `docs/governance.md` states. See `docs/governance.md`.
 
 ## Enterprise-Only Features
 
