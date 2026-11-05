@@ -211,3 +211,25 @@ test("scripts/e2e-ai.sh names the AI route, the mock reply, the scope and the 42
     assert.ok(text.includes(literal), `scripts/e2e-ai.sh lacks ${literal}`);
   }
 });
+
+// PR 9, S3: the prompt guard scans every role. Without match_all_roles it checks user messages only,
+// so an injection or an SSN in a system or assistant message passes.
+test("PR 9: ai-prompt-guard sets match_all_roles: true", () => {
+  assert.match(aiRoute(), /^\s*match_all_roles:\s*true\b/m);
+});
+
+test("PR 9: the log_statistics comment does not claim the access log gets token counts", () => {
+  const block = aiRoute();
+  assert.match(block, /log_statistics:\s*true/);
+  assert.doesNotMatch(
+    block,
+    /Add token counts and latency to Kong's access log/,
+    "the old comment says token counts reach the access log, but no log plugin is configured",
+  );
+});
+
+test("PR 9: scripts/e2e-ai.sh probes the system and assistant roles", () => {
+  const text = read(FILES.e2eAi);
+  assert.match(text, /"role":"system"/);
+  assert.match(text, /"role":"assistant"/);
+});

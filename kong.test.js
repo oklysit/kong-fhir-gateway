@@ -66,27 +66,28 @@ function portItems(text) {
   return items;
 }
 
-// Split the `routes:` list of the template into one text chunk per route.
+// Split every `routes:` list of the template (one per service) into one text chunk per route.
 // A route starts at the list's own "- " indent and runs to the next route.
 function routeChunks(text) {
   const lines = text.split("\n");
-  const at = lines.findIndex((line) => /^\s*routes:\s*$/.test(line));
-  if (at < 0) return [];
-  const first = lines.findIndex((line, i) => i > at && /^\s*-\s/.test(line));
-  if (first < 0) return [];
-  const indent = lines[first].match(/^(\s*)/)[1];
   const chunks = [];
-  let current = null;
-  for (let i = first; i < lines.length; i++) {
-    const line = lines[i];
-    const lineIndent = line.match(/^(\s*)/)[1];
-    // A non-empty line less indented than the list means the routes list has ended.
-    if (line.trim() !== "" && lineIndent.length < indent.length) break;
-    if (line.startsWith(`${indent}- `)) {
-      current = [];
-      chunks.push(current);
+  for (let at = 0; at < lines.length; at++) {
+    if (!/^\s*routes:\s*$/.test(lines[at])) continue;
+    const first = lines.findIndex((line, i) => i > at && /^\s*-\s/.test(line));
+    if (first < 0) continue;
+    const indent = lines[first].match(/^(\s*)/)[1];
+    let current = null;
+    for (let i = first; i < lines.length; i++) {
+      const line = lines[i];
+      const lineIndent = line.match(/^(\s*)/)[1];
+      // A non-empty line less indented than the list means this routes list has ended.
+      if (line.trim() !== "" && lineIndent.length < indent.length) break;
+      if (line.startsWith(`${indent}- `)) {
+        current = [];
+        chunks.push(current);
+      }
+      if (current) current.push(line);
     }
-    if (current) current.push(line);
   }
   return chunks.map((chunk) => chunk.join("\n"));
 }
@@ -325,4 +326,67 @@ test("e2e.sh checks the two negative proofs: mock on 8080 and admin on 8001 are 
 
 test("e2e.sh exits non-zero on the first failed check", () => {
   assert.match(read(FILES.e2e), /exit 1\b/);
+});
+
+// PR 9, S2: no token in the URL. Kong's jwt plugin also reads a token from the query string
+// (uri_param_names, default "jwt"). An empty list turns that off, so only the header carries a token.
+// Return one plugin's text inside a route chunk: from its "- name:" line to the next plugin.
+function pluginBlock(chunk, name) {
+  const lines = chunk.split("\n");
+  const start = lines.findIndex((line) => new RegExp(`^\\s*-\\s*name:\\s*["']?${name}["']?\\s*$`).test(line));
+  if (start < 0) return "";
+  const indent = lines[start].match(/^\s*/)[0].length;
+  const out = [lines[start]];
+  for (let i = start + 1; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed !== "" && !trimmed.startsWith("#") && lines[i].match(/^\s*/)[0].length <= indent) break;
+    out.push(lines[i]);
+  }
+  return out.join("\n");
+}
+
+test("PR 9: the jwt plugin on the fhir route turns off the URL token (uri_param_names: [])", () => {
+  const chunks = routeChunks(read(FILES.template));
+  const fhir = chunks.find((chunk) => /\/fhir\b/.test(chunk) && !chunk.includes("smart-configuration"));
+  assert.ok(fhir, "no route for /fhir");
+  const jwt = pluginBlock(fhir, "jwt");
+  assert.ok(jwt, "fhir route has no jwt plugin");
+  assert.match(jwt, /^\s*uri_param_names:\s*\[\s*\]\s*(#.*)?$/m, "fhir jwt plugin does not set uri_param_names: []");
+});
+
+test("PR 9: the jwt plugin on the ai-chat route turns off the URL token (uri_param_names: [])", () => {
+  const chunks = routeChunks(read(FILES.template));
+  const ai = chunks.find((chunk) => chunk.includes("/ai/chat"));
+  assert.ok(ai, "no route for /ai/chat");
+  const jwt = pluginBlock(ai, "jwt");
+  assert.ok(jwt, "ai-chat route has no jwt plugin");
+  assert.match(jwt, /^\s*uri_param_names:\s*\[\s*\]\s*(#.*)?$/m, "ai-chat jwt plugin does not set uri_param_names: []");
+});
+
+test("PR 9: every uri_param_names line in the template is the empty list", () => {
+  const lines = read(FILES.template).split("\n").filter((line) => /^\s*uri_param_names:/.test(line));
+  assert.equal(lines.length, 2, "expected one uri_param_names line per jwt plugin (two)");
+  for (const line of lines) assert.match(line, /uri_param_names:\s*\[\s*\]/);
+});
+
+// PR 9, R1: the e2e script must prove the write methods. Guards against the checks being removed.
+test("PR 9: e2e.sh probes POST, PUT, PATCH and DELETE on /fhir/Patient/patient-1", () => {
+  const text = read(FILES.e2e);
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    assert.match(text, new RegExp(`\\b${method}\\b`), `e2e.sh has no ${method} probe`);
+  }
+});
+
+// PR 9, S2: the e2e script sends the token in the URL and expects 401.
+test("PR 9: e2e.sh sends ?jwt= on the FHIR and AI routes", () => {
+  const text = read(FILES.e2e);
+  assert.match(text, /\?jwt=/);
+  assert.match(text, /\/ai\/chat/);
+});
+
+// PR 9, S1: the e2e script tries to edit the patient attribute through the account API.
+test("PR 9: e2e.sh checks the account API and the patient claim after an edit attempt", () => {
+  const text = read(FILES.e2e);
+  assert.match(text, /realms\/fhir\/account/);
+  assert.match(text, /patient-2/);
 });

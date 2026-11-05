@@ -220,11 +220,157 @@ else
   fail "14 ada OPTIONS /fhir/Patient/patient-1 -> 403 (deny by default for non-GET)" "status $STATUS"
 fi
 
-# 15. LAST: rate limit. Up to 45 GETs of patient-1 with ada's token. The limit is 30 per minute
+# 15a-15d. Write methods with ada's valid token -> 403 each (deny by default for non-GET).
+# The guard allows GET only. Each probe sends a small JSON body where the method takes one.
+# Arguments: label, method.
+write_probe() {
+  local label="$1"
+  local method="$2"
+  STATUS=$(curl -sS -X "$method" -o "$BODY" -D "$HDRS" -w '%{http_code}' \
+    -H "Authorization: Bearer $ADA" -H 'Content-Type: application/fhir+json' \
+    --data-binary '{"resourceType":"Patient","id":"patient-1"}' \
+    "$KONG/fhir/Patient/patient-1") || STATUS=000
+  if [ "$STATUS" = "403" ]; then
+    pass "$label -> 403 (deny by default for non-GET)"
+  else
+    fail "$label -> 403 (deny by default for non-GET)" "status $STATUS"
+  fi
+}
+write_probe "15a ada POST /fhir/Patient/patient-1" POST
+write_probe "15b ada PUT /fhir/Patient/patient-1" PUT
+write_probe "15c ada PATCH /fhir/Patient/patient-1" PATCH
+write_probe "15d ada DELETE /fhir/Patient/patient-1" DELETE
+
+# 16a. A valid token in the URL (?jwt=) and no Authorization header -> 401. Kong must read the
+# token from the header only. Check 4 proves the same token works in the header.
+STATUS=$(curl -sS -o "$BODY" -D "$HDRS" -w '%{http_code}' "$KONG/fhir/Patient/patient-1?jwt=$ADA") || STATUS=000
+CTYPE=$(grep -i '^content-type:' "$HDRS" | tail -n 1 | tr -d '\r' | cut -d: -f2- | sed 's/^ *//')
+if [ "$STATUS" = "401" ] && is_outcome login; then
+  pass "16a valid token in ?jwt= on /fhir/Patient/patient-1, no header -> 401 OperationOutcome login"
+else
+  fail "16a valid token in ?jwt= on /fhir/Patient/patient-1, no header -> 401" "status $STATUS, content-type '$CTYPE'"
+fi
+
+# 16b. Same on the AI route. A 401 stops at jwt, so it does not count against the AI budget.
+STATUS=$(curl -sS -X POST -o "$BODY" -D "$HDRS" -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  --data-binary '{"messages":[{"role":"user","content":"Summarize the visit note for today"}]}' \
+  "$KONG/ai/chat?jwt=$ADA") || STATUS=000
+CTYPE=$(grep -i '^content-type:' "$HDRS" | tail -n 1 | tr -d '\r' | cut -d: -f2- | sed 's/^ *//')
+if [ "$STATUS" = "401" ] && is_outcome login; then
+  pass "16b valid token in ?jwt= on POST /ai/chat, no header -> 401 OperationOutcome login"
+else
+  fail "16b valid token in ?jwt= on POST /ai/chat, no header -> 401" "status $STATUS, content-type '$CTYPE'"
+fi
+
+# Read one claim from a JWT payload. Arguments: token, claim name. Prints the value, or nothing.
+# A JWT payload is base64url. Map it to base64, pad it to a multiple of 4, then decode it.
+claim_of() {
+  local payload
+  payload=$(printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+')
+  while [ $(( ${#payload} % 4 )) -ne 0 ]; do
+    payload="$payload="
+  done
+  printf '%s' "$payload" | base64 -d 2>/dev/null | jq -r --arg c "$2" '.[$c] // empty' 2>/dev/null
+}
+
+# Call the Keycloak account API with a bearer token. Arguments: method, token, JSON body (optional).
+# Sets STATUS and leaves the body in $BODY. This API is how a user edits their own profile.
+account_call() {
+  local method="$1"
+  local token="$2"
+  local payload="${3:-}"
+  local -a args=(-X "$method" -H "Authorization: Bearer $token" -H 'Accept: application/json')
+  if [ -n "$payload" ]; then
+    args+=(-H 'Content-Type: application/json' --data-binary "$payload")
+  fi
+  STATUS=$(curl -sS -o "$BODY" -D "$HDRS" -w '%{http_code}' "${args[@]}" "$KEYCLOAK/realms/fhir/account") || STATUS=000
+}
+
+# Diagnostic only. Print selected claims of a JWT payload (never the signature) as compact JSON.
+# Argument: token.
+claims_summary() {
+  local payload
+  payload=$(printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+')
+  while [ $(( ${#payload} % 4 )) -ne 0 ]; do
+    payload="$payload="
+  done
+  printf '%s' "$payload" | base64 -d 2>/dev/null \
+    | jq -c '{aud, azp, scope, realm_access, resource_access, iss}' 2>/dev/null || echo "(payload not decodable)"
+}
+
+# 17. A user must not change their own patient attribute. The check has a positive control first,
+# so that a rejection of the attack cannot come from a broken request.
+# 17a. Baseline: ada's token carries patient-1 and ben's carries patient-2.
+if [ "$(claim_of "$ADA" patient)" = "patient-1" ] && [ "$(claim_of "$BEN" patient)" = "patient-2" ]; then
+  pass "17a baseline: ada's token has patient patient-1, ben's has patient-2"
+else
+  fail "17a baseline patient claims" "ada '$(claim_of "$ADA" patient)', ben '$(claim_of "$BEN" patient)'"
+fi
+
+# 17b. Control 1: ada's token can read her own profile from the account API -> 200.
+# If this fails, the demo client's token cannot use the account API and 17c-17e would prove nothing.
+account_call GET "$ADA"
+if [ "$STATUS" = "200" ] && jq -e '.username == "ada"' "$BODY" >/dev/null 2>&1; then
+  pass "17b control: ada GET account API with her own token -> 200"
+else
+  fail "17b control: ada GET account API -> 200" "status $STATUS, body $(head -c 300 "$BODY"); www-authenticate '$(grep -i '^www-authenticate:' "$HDRS" | tr -d '\r' | cut -d: -f2- | sed 's/^ *//')'; response headers: $(tr -d '\r' < "$HDRS" | tr '\n' '|'); ada token claims: $(claims_summary "$ADA")"
+fi
+PROFILE=$(cat "$BODY")
+
+# 17c. Control 2: ada can edit a field she may edit. Send her profile back with a changed first
+# and last name (the default profile requires both) and read it back -> 204, then the new value.
+# Sending the whole profile keeps her other attributes. The same request shape carries the attack in 17d.
+EDIT=$(printf '%s' "$PROFILE" | jq -c '.firstName = "Ada" | .lastName = "Demo"')
+account_call POST "$ADA" "$EDIT"
+if [ "$STATUS" != "204" ]; then
+  fail "17c control: ada POST account API changes her first name -> 204" "status $STATUS, body $(head -c 300 "$BODY")"
+fi
+account_call GET "$ADA"
+if [ "$STATUS" = "200" ] && jq -e '.firstName == "Ada" and .lastName == "Demo"' "$BODY" >/dev/null 2>&1; then
+  pass "17c control: ada edits her own first name through the account API -> 204 and the change is visible"
+else
+  fail "17c control: the first name change is visible" "status $STATUS, body $(head -c 300 "$BODY")"
+fi
+PROFILE=$(cat "$BODY")
+
+# 17d. Attack: the same request, with the patient attribute set to patient-2. A rejection (4xx)
+# or a 204 that changes nothing both pass here. 17e decides by looking at the next token.
+ATTACK=$(printf '%s' "$PROFILE" | jq -c '.attributes.patient = ["patient-2"]')
+account_call POST "$ADA" "$ATTACK"
+ATTACK_STATUS=$STATUS
+case "$ATTACK_STATUS" in
+  204|4??) pass "17d ada POST account API with patient=patient-2 -> $ATTACK_STATUS (17e checks the effect)" ;;
+  *) fail "17d ada POST account API with patient=patient-2" "status $ATTACK_STATUS, body $(head -c 300 "$BODY")" ;;
+esac
+
+# 17e. A new token for ada still says patient-1, and ben's still says patient-2.
+ADA_AFTER=$(token_for ada "$SCOPE")
+BEN_AFTER=$(token_for ben "$SCOPE")
+if [ -z "$ADA_AFTER" ] || [ -z "$BEN_AFTER" ]; then
+  fail "17e new tokens after the attack" "Keycloak returned no access token for ada or ben"
+fi
+if [ "$(claim_of "$ADA_AFTER" patient)" = "patient-1" ] && [ "$(claim_of "$BEN_AFTER" patient)" = "patient-2" ]; then
+  pass "17e after the attempt, a new ada token still has patient patient-1 (ben's patient-2)"
+else
+  fail "17e patient claim after the attempt" "ada '$(claim_of "$ADA_AFTER" patient)' (attack status $ATTACK_STATUS), ben '$(claim_of "$BEN_AFTER" patient)'"
+fi
+
+# 18. LAST: rate limit. Up to 45 GETs of patient-1 with ada's token. The limit is 30 per minute
 # for the one consumer, so at least one answer must be 429: a FHIR OperationOutcome with code
-# throttled and content type application/fhir+json. The checks above send 16 requests through
-# route fhir (checks 4-9, 12a-12g, 13, 14). Checks 1 and 2 do not count: jwt rejects those
-# before rate-limiting runs.
+# throttled and content type application/fhir+json.
+# Budget arithmetic. Only requests that pass jwt count, because rate-limiting runs after jwt and
+# before fhir-guard. Checks 1 and 2 and 16a are 401s from jwt, so they do not count. The Keycloak
+# calls (tokens, account API) do not go through Kong, so they do not count either.
+#   checks 4, 5, 6a, 6b, 7, 8, 9        =  7
+#   checks 12a-12g                      =  7
+#   checks 13 and 14                    =  2
+#   checks 15a-15d (POST, PUT, PATCH, DELETE) = 4
+#   total before the loop               = 20, under the limit of 30
+# So requests 1 to 10 of the loop get an answer, and request 11 is the first 429. The loop allows
+# 45, so a window change during the run (the counter resets) still leaves one window over 30:
+# 20 + 45 = 65 requests in at most two windows.
+FHIR_BEFORE=20
 HIT=0
 for i in $(seq 1 45); do
   request "$KONG/fhir/Patient/patient-1" "$ADA"
@@ -234,12 +380,12 @@ for i in $(seq 1 45); do
   fi
 done
 if [ "$HIT" -eq 0 ]; then
-  fail "15 rate limit: a 429 within 45 GETs of /fhir/Patient/patient-1" "no 429 (last status $STATUS)"
+  fail "18 rate limit: a 429 within 45 GETs of /fhir/Patient/patient-1" "no 429 (last status $STATUS)"
 fi
 if [ "$STATUS" = "429" ] && is_outcome throttled; then
-  pass "15 rate limit: GET $HIT of 45 -> 429 OperationOutcome throttled, application/fhir+json"
+  pass "18 rate limit: $FHIR_BEFORE FHIR requests before the loop; GET $HIT of 45 -> 429 OperationOutcome throttled, application/fhir+json"
 else
-  fail "15 rate limit: a 429 within 45 GETs of /fhir/Patient/patient-1" "status $STATUS, content-type '$CTYPE'"
+  fail "18 rate limit: a 429 within 45 GETs of /fhir/Patient/patient-1" "status $STATUS, content-type '$CTYPE'"
 fi
 
 echo "ALL CHECKS PASSED"
