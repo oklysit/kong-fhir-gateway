@@ -284,7 +284,19 @@ account_call() {
   if [ -n "$payload" ]; then
     args+=(-H 'Content-Type: application/json' --data-binary "$payload")
   fi
-  STATUS=$(curl -sS -o "$BODY" -w '%{http_code}' "${args[@]}" "$KEYCLOAK/realms/fhir/account") || STATUS=000
+  STATUS=$(curl -sS -o "$BODY" -D "$HDRS" -w '%{http_code}' "${args[@]}" "$KEYCLOAK/realms/fhir/account") || STATUS=000
+}
+
+# Diagnostic only. Print selected claims of a JWT payload (never the signature) as compact JSON.
+# Argument: token.
+claims_summary() {
+  local payload
+  payload=$(printf '%s' "$1" | cut -d. -f2 | tr '_-' '/+')
+  while [ $(( ${#payload} % 4 )) -ne 0 ]; do
+    payload="$payload="
+  done
+  printf '%s' "$payload" | base64 -d 2>/dev/null \
+    | jq -c '{aud, azp, scope, realm_access, resource_access, iss}' 2>/dev/null || echo "(payload not decodable)"
 }
 
 # 17. A user must not change their own patient attribute. The check has a positive control first,
@@ -302,7 +314,7 @@ account_call GET "$ADA"
 if [ "$STATUS" = "200" ] && jq -e '.username == "ada"' "$BODY" >/dev/null 2>&1; then
   pass "17b control: ada GET account API with her own token -> 200"
 else
-  fail "17b control: ada GET account API -> 200" "status $STATUS, body $(head -c 300 "$BODY")"
+  fail "17b control: ada GET account API -> 200" "status $STATUS, body $(head -c 300 "$BODY"); www-authenticate '$(grep -i '^www-authenticate:' "$HDRS" | tr -d '\r' | cut -d: -f2- | sed 's/^ *//')'; response headers: $(tr -d '\r' < "$HDRS" | tr '\n' '|'); ada token claims: $(claims_summary "$ADA")"
 fi
 PROFILE=$(cat "$BODY")
 
