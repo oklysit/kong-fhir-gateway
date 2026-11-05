@@ -224,3 +224,31 @@ test("CI keeps the test and compose job keys", () => {
   assert.match(text, /^\s*test:\s*$/m);
   assert.match(text, /^\s*compose:\s*$/m);
 });
+
+// PR 9, S1: the patient claim is admin-only. A user must not edit their own `patient` attribute
+// through the account API. The realm declares `patient` as a managed user-profile attribute that
+// only an admin can view or edit, and it does not leave unmanaged attributes open to the user.
+function loadUserProfile() {
+  const provider = loadRealm().components?.["org.keycloak.userprofile.UserProfileProvider"]?.[0];
+  assert.ok(provider, "realm has no user profile provider component");
+  const raw = provider.config?.["kc.user.profile.config"]?.[0];
+  assert.ok(raw, "user profile provider has no kc.user.profile.config");
+  return JSON.parse(raw);
+}
+
+test("PR 9: user profile declares `patient` with admin-only view and edit", () => {
+  const attribute = loadUserProfile().attributes?.find((a) => a.name === "patient");
+  assert.ok(attribute, "user profile does not declare a managed `patient` attribute");
+  assert.deepEqual(attribute.permissions?.edit, ["admin"], "patient edit permission is not [admin]");
+  assert.deepEqual(attribute.permissions?.view, ["admin"], "patient view permission is not [admin]");
+});
+
+test("PR 9: unmanagedAttributePolicy is not ENABLED (users cannot write unmanaged attributes)", () => {
+  assert.notEqual(loadUserProfile().unmanagedAttributePolicy, "ENABLED");
+});
+
+test("PR 9: e2e.sh tries to change the patient attribute and re-checks the claim", () => {
+  const text = read("scripts/e2e.sh");
+  assert.match(text, /realms\/fhir\/account/);
+  assert.match(text, /patient-1/);
+});
