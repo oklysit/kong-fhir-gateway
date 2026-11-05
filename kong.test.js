@@ -328,7 +328,7 @@ test("e2e.sh exits non-zero on the first failed check", () => {
   assert.match(read(FILES.e2e), /exit 1\b/);
 });
 
-// PR 9, S2: no token in the URL. Kong's jwt plugin also reads a token from the query string
+// No token in the URL. Kong's jwt plugin also reads a token from the query string
 // (uri_param_names, default "jwt"). An empty list turns that off, so only the header carries a token.
 // Return one plugin's text inside a route chunk: from its "- name:" line to the next plugin.
 function pluginBlock(chunk, name) {
@@ -345,7 +345,7 @@ function pluginBlock(chunk, name) {
   return out.join("\n");
 }
 
-test("PR 9: the jwt plugin on the fhir route turns off the URL token (uri_param_names: [])", () => {
+test("the jwt plugin on the fhir route turns off the URL token (uri_param_names: [])", () => {
   const chunks = routeChunks(read(FILES.template));
   const fhir = chunks.find((chunk) => /\/fhir\b/.test(chunk) && !chunk.includes("smart-configuration"));
   assert.ok(fhir, "no route for /fhir");
@@ -354,7 +354,7 @@ test("PR 9: the jwt plugin on the fhir route turns off the URL token (uri_param_
   assert.match(jwt, /^\s*uri_param_names:\s*\[\s*\]\s*(#.*)?$/m, "fhir jwt plugin does not set uri_param_names: []");
 });
 
-test("PR 9: the jwt plugin on the ai-chat route turns off the URL token (uri_param_names: [])", () => {
+test("the jwt plugin on the ai-chat route turns off the URL token (uri_param_names: [])", () => {
   const chunks = routeChunks(read(FILES.template));
   const ai = chunks.find((chunk) => chunk.includes("/ai/chat"));
   assert.ok(ai, "no route for /ai/chat");
@@ -363,30 +363,112 @@ test("PR 9: the jwt plugin on the ai-chat route turns off the URL token (uri_par
   assert.match(jwt, /^\s*uri_param_names:\s*\[\s*\]\s*(#.*)?$/m, "ai-chat jwt plugin does not set uri_param_names: []");
 });
 
-test("PR 9: every uri_param_names line in the template is the empty list", () => {
+test("every uri_param_names line in the template is the empty list", () => {
   const lines = read(FILES.template).split("\n").filter((line) => /^\s*uri_param_names:/.test(line));
   assert.equal(lines.length, 2, "expected one uri_param_names line per jwt plugin (two)");
   for (const line of lines) assert.match(line, /uri_param_names:\s*\[\s*\]/);
 });
 
-// PR 9, R1: the e2e script must prove the write methods. Guards against the checks being removed.
-test("PR 9: e2e.sh probes POST, PUT, PATCH and DELETE on /fhir/Patient/patient-1", () => {
+// The e2e script must prove the write methods. Guards against the checks being removed.
+test("e2e.sh probes POST, PUT, PATCH and DELETE on /fhir/Patient/patient-1", () => {
   const text = read(FILES.e2e);
   for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
     assert.match(text, new RegExp(`\\b${method}\\b`), `e2e.sh has no ${method} probe`);
   }
 });
 
-// PR 9, S2: the e2e script sends the token in the URL and expects 401.
-test("PR 9: e2e.sh sends ?jwt= on the FHIR and AI routes", () => {
+// The e2e script sends the token in the URL and expects 401.
+test("e2e.sh sends ?jwt= on the FHIR and AI routes", () => {
   const text = read(FILES.e2e);
   assert.match(text, /\?jwt=/);
   assert.match(text, /\/ai\/chat/);
 });
 
-// PR 9, S1: the e2e script tries to edit the patient attribute through the account API.
-test("PR 9: e2e.sh checks the account API and the patient claim after an edit attempt", () => {
+// The e2e script tries to edit the patient attribute through the account API.
+test("e2e.sh checks the account API and the patient claim after an edit attempt", () => {
   const text = read(FILES.e2e);
   assert.match(text, /realms\/fhir\/account/);
   assert.match(text, /patient-2/);
+});
+
+// The gateway's own audit log. fhir-guard records who read what and the decision, and the
+// file-log plugin writes one JSON line per request to the container log.
+// Return the top-level `plugins:` section of the template (a plugin that applies to every route).
+function globalPlugins(text) {
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => /^plugins:\s*$/.test(line));
+  if (start < 0) return "";
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^[A-Za-z_]/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n");
+}
+
+// The file-log plugin that applies to one route: its own, or the global one.
+function fileLogFor(chunk) {
+  return pluginBlock(chunk, "file-log") || pluginBlock(globalPlugins(read(FILES.template)), "file-log");
+}
+
+// Keep only non-comment lines, so a comment cannot satisfy a check.
+function withoutComments(text) {
+  return text
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("#"))
+    .join("\n");
+}
+
+// Find the template chunk of the FHIR route and of the AI route.
+function fhirChunk() {
+  return routeChunks(read(FILES.template)).find((chunk) => /\/fhir\b/.test(chunk) && !chunk.includes("smart-configuration"));
+}
+function aiChunk() {
+  return routeChunks(read(FILES.template)).find((chunk) => chunk.includes("/ai/chat"));
+}
+
+test("the fhir route runs file-log with path /dev/stdout", () => {
+  const fhir = fhirChunk();
+  assert.ok(fhir, "no route for /fhir");
+  const block = fileLogFor(fhir);
+  assert.ok(block, "no file-log plugin on the fhir route or globally");
+  assert.match(block, /^\s*path:\s*["']?\/dev\/stdout["']?\s*(#.*)?$/m, "file-log path is not /dev/stdout");
+});
+
+test("the ai-chat route runs file-log with path /dev/stdout", () => {
+  const ai = aiChunk();
+  assert.ok(ai, "no route for /ai/chat");
+  const block = fileLogFor(ai);
+  assert.ok(block, "no file-log plugin on the ai-chat route or globally");
+  assert.match(block, /^\s*path:\s*["']?\/dev\/stdout["']?\s*(#.*)?$/m, "file-log path is not /dev/stdout");
+});
+
+// file-log writes the request headers by default, and a Bearer token would land in the log.
+// The Authorization header must be removed, in the plugin config or by the handler.
+test("the log strips the Authorization header (plugin config or handler)", () => {
+  const handler = withoutComments(read(FILES.handler));
+  const handlerStrips = /set_serialize_value[\s\S]{0,80}authorization/i.test(handler);
+  for (const [name, chunk] of [["fhir", fhirChunk()], ["ai-chat", aiChunk()]]) {
+    assert.ok(chunk, `no ${name} route`);
+    const block = withoutComments(fileLogFor(chunk));
+    assert.ok(block, `no file-log plugin for the ${name} route`);
+    assert.ok(/authorization/i.test(block) || handlerStrips, `nothing strips the Authorization header on the ${name} route`);
+  }
+});
+
+// The handler records the identity and the decision. The e2e scripts read these exact field names
+// from the JSON line: request.sub, request.patient, request.azp, request.decision, request.reason.
+test("handler.lua sets the serialized log fields sub, patient, azp and decision", () => {
+  const text = withoutComments(read(FILES.handler));
+  assert.match(text, /set_serialize_value/, "handler.lua never calls set_serialize_value");
+  for (const field of ["sub", "patient", "azp", "decision", "reason"]) {
+    assert.match(text, new RegExp(`["']request\\.${field}["']`), `handler.lua sets no request.${field}`);
+  }
+  assert.match(text, /["']allow["']/, "handler.lua never records the decision allow");
+  assert.match(text, /["']deny["']/, "handler.lua never records the decision deny");
+  assert.match(text, /["']patient_mismatch["']/, "handler.lua has no patient_mismatch reason code");
+  // Only the four claims go into the log. The raw token must never be passed to a serialized value.
+  assert.doesNotMatch(text, /set_serialize_value\s*\([^)]*(authenticated_jwt_token|\btoken\b)/, "handler.lua logs the token");
 });

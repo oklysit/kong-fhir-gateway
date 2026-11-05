@@ -10,6 +10,13 @@
 --     B. The token's "scope" claim must contain "ai/chat" as a whole word.
 --     Any other /ai path is denied, so a new AI path needs a new rule here first.
 -- It also rewrites Kong's own 400, 401 and 429 bodies into FHIR OperationOutcome.
+-- Audit fields: once the token is parsed, it adds who asked and what the guard decided to the
+-- request log line that the file-log plugin writes (see record_identity and record_decision).
+-- Fields: request.sub, request.patient, request.azp, request.decision (allow or deny) and
+-- request.reason (on a deny only: token, method, path, scope or patient_mismatch).
+-- "allow" means only that this plugin let the request pass. A later plugin, such as
+-- ai-prompt-guard, can still refuse it, and then the line shows allow with that plugin's status.
+-- A request that jwt or rate-limiting refuses never reaches this plugin, so its line has no decision.
 
 -- The jwt parser that ships inside Kong. Used to read the claims of the already-verified token.
 local jwt_parser = require "kong.plugins.jwt.jwt_parser"
@@ -33,8 +40,37 @@ local function outcome(code, text)
     .. code .. '","diagnostics":"' .. text .. '"}]}'
 end
 
+-- Add one named field to the JSON log line of this request. Kong writes the line in the log phase,
+-- after the response, and keeps the value until then. A dot in the name makes a nested field,
+-- so "request.sub" ends up as {"request": {"sub": ...}}.
+-- Only a string is kept. A claim of any other type (a number, a list) is dropped, so the log
+-- never receives a structure we did not plan for.
+local function log_field(name, value)
+  if type(value) == "string" then
+    kong.log.set_serialize_value(name, value)
+  end
+end
+
+-- Record who made the request. Reads three claims of the verified token and nothing else.
+-- sub is the Keycloak user id, patient is the patient the token is tied to, azp is the client.
+-- The token string itself is never passed on.
+local function record_identity(claims)
+  log_field("request.sub", claims.sub)
+  log_field("request.patient", claims.patient)
+  log_field("request.azp", claims.azp)
+end
+
+-- Record the guard decision: "allow", or "deny" with a short reason code.
+local function record_decision(decision, reason)
+  log_field("request.decision", decision)
+  log_field("request.reason", reason)
+end
+
 -- Send an error answer with a FHIR body. Ends the request at once; no later plugin runs.
-local function deny(status, code, text)
+-- reason is the short code written to the log line, for example "scope". The client never sees it.
+-- Every denial of this plugin goes through here, so every denial is recorded before the answer is sent.
+local function deny(status, code, text, reason)
+  record_decision("deny", reason)
   return kong.response.exit(status, outcome(code, text), {
     -- The FHIR content type, so the client reads the body as a FHIR resource.
     ["Content-Type"] = "application/fhir+json",
@@ -58,23 +94,31 @@ local function has_scope(scope_string, wanted)
 end
 
 -- Rules for the AI route. Deny by default: only POST on exactly /ai/chat, with the ai/chat scope.
--- Returns nothing when every rule passes, so the request goes on to ai-prompt-guard and ai-proxy.
+-- Returns true when every rule passes, so the request goes on to ai-prompt-guard and ai-proxy.
+-- Returns false when a rule fails. The answer has already been sent and the decision recorded
+-- (deny does both), so the caller only has to stop.
 local function check_ai(claims, path)
   -- Rule A1: only POST. Kong's route also matches GET, and GET is not offered for chat.
   if kong.request.get_method() ~= "POST" then
-    return deny(403, "forbidden", "This method is not allowed.")
+    deny(403, "forbidden", "This method is not allowed.", "method")
+    return false
   end
 
   -- Rule A2: the path must be exactly /ai/chat. Kong matches routes by prefix, so /ai/chat/extra
   -- reaches this plugin. The exact comparison refuses it.
   if path ~= "/ai/chat" then
-    return deny(403, "forbidden", "Only /ai/chat is allowed.")
+    deny(403, "forbidden", "Only /ai/chat is allowed.", "path")
+    return false
   end
 
   -- Rule B: the token must carry the ai/chat scope as a whole word.
   if not has_scope(claims.scope, "ai/chat") then
-    return deny(403, "forbidden", "The token does not allow AI operations.")
+    deny(403, "forbidden", "The token does not allow AI operations.", "scope")
+    return false
   end
+
+  -- Every rule passed.
+  return true
 end
 
 -- Access phase: runs for every request that reaches the fhir or ai route, after jwt has accepted the token.
@@ -84,17 +128,20 @@ function FhirGuard:access(conf)
 
   -- Should never happen after jwt accepted the request. Deny anyway, so an unknown state fails closed.
   if not token then
-    return deny(401, "login", "Missing or invalid bearer token.")
+    return deny(401, "login", "Missing or invalid bearer token.", "token")
   end
 
   -- Parse the token. parser:new returns the parsed token, or nil and an error message.
   local parsed, err = jwt_parser:new(token)
   if not parsed then
-    return deny(403, "forbidden", "The token could not be read.")
+    return deny(403, "forbidden", "The token could not be read.", "token")
   end
 
   -- The decoded payload: the claims table, with fields such as scope, patient and iss.
   local claims = parsed.claims or {}
+
+  -- From here on every log line of this request names the caller, allowed or denied.
+  record_identity(claims)
 
   -- The request path, without the query string. The branches below both read it.
   local path = kong.request.get_path()
@@ -102,34 +149,42 @@ function FhirGuard:access(conf)
   -- AI branch: every path that starts with /ai. string.sub compares plain text, so no escaping is needed.
   -- Anything under /ai that is not exactly /ai/chat is denied inside check_ai.
   if string.sub(path, 1, 3) == "/ai" then
-    return check_ai(claims, path)
+    -- check_ai returns false when a rule failed. It has then already recorded the deny and sent the answer,
+    -- so stop here and do not record an allow.
+    if not check_ai(claims, path) then
+      return
+    end
+    -- All AI rules passed. Record the allow, then return nothing, so the request goes on to ai-prompt-guard.
+    record_decision("allow")
+    return
   end
 
   -- FHIR branch: the rules below are the /fhir rules, unchanged by the AI route.
 
   -- Rule 1a: only GET. Writes are not offered through this gateway.
   if kong.request.get_method() ~= "GET" then
-    return deny(403, "forbidden", "This method is not allowed.")
+    return deny(403, "forbidden", "This method is not allowed.", "method")
   end
 
   -- Rule 1b: the path must be exactly /fhir/Patient/<id>. The capture takes one segment with no slash.
   local id = string.match(path, "^/fhir/Patient/([^/]+)$")
   if not id then
-    return deny(403, "forbidden", "Only single Patient reads are allowed.")
+    return deny(403, "forbidden", "Only single Patient reads are allowed.", "path")
   end
 
   -- Rule 2: the token must carry the read scope for Patient.
   if not has_scope(claims.scope, "patient/Patient.read") then
-    return deny(403, "forbidden", "The token does not allow reading Patient.")
+    return deny(403, "forbidden", "The token does not allow reading Patient.", "scope")
   end
 
   -- Rule 3: the patient in the token must be the patient asked for.
   -- The message does not name either patient, so it reveals nothing about other records.
   if claims.patient ~= id then
-    return deny(403, "forbidden", "The token does not allow this patient.")
+    return deny(403, "forbidden", "The token does not allow this patient.", "patient_mismatch")
   end
 
-  -- All three rules pass. Return nothing, so the request goes on to the mock FHIR server.
+  -- All three rules pass. Record the allow, then return nothing, so the request goes on to the mock FHIR server.
+  record_decision("allow")
 end
 
 -- Header filter: runs when Kong sends the response headers. Decides whether the body must be rewritten.
